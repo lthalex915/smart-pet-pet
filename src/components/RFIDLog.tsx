@@ -29,8 +29,8 @@ export default function RFIDLog({ scans }: Props) {
             <span className="text-gray-900 font-bold text-sm tracking-widest">
               {scan.uid}
             </span>
-            <span className="flex items-center gap-1.5 text-green-600 text-xs font-medium">
-              <span className="w-1.5 h-1.5 bg-green-500 rounded-full inline-block" />
+            <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: '#1937E6' }}>
+              <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ backgroundColor: '#1937E6' }} />
               已記錄
             </span>
           </div>
