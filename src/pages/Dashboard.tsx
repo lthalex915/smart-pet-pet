@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { signOut, type User } from 'firebase/auth';
-import { auth } from '../firebase';
+import { signOut, linkWithPopup, type User } from 'firebase/auth';
+import { auth, googleProvider } from '../firebase';
 import { useSensorData }   from '../hooks/useSensorData';
 import { useRFIDHistory }  from '../hooks/useRFIDHistory';
 import SensorCard   from '../components/SensorCard';
@@ -31,10 +31,48 @@ function PawIcon({ className }: { className?: string }) {
   );
 }
 
+function GoogleIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+      <path d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4" />
+      <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853" />
+      <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05" />
+      <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335" />
+    </svg>
+  );
+}
+
 export default function Dashboard({ user }: Props) {
-  const [tab, setTab] = useState<Tab>('sensors');
+  const [tab,         setTab]         = useState<Tab>('sensors');
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkMsg,     setLinkMsg]     = useState('');
   const { data, loading, error } = useSensorData();
   const { scans }               = useRFIDHistory();
+
+  // Check if user already has Google linked
+  const hasGoogleLinked = user.providerData.some(p => p.providerId === 'google.com');
+  // Check if user has email/password provider
+  const hasPasswordProvider = user.providerData.some(p => p.providerId === 'password');
+
+  const handleLinkGoogle = async () => {
+    setLinkLoading(true);
+    setLinkMsg('');
+    try {
+      await linkWithPopup(user, googleProvider);
+      setLinkMsg('✓ Google 帳號已成功連結！');
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'auth/credential-already-in-use') {
+        setLinkMsg('此 Google 帳號已與其他帳戶關聯');
+      } else if (code === 'auth/popup-closed-by-user') {
+        setLinkMsg('視窗已關閉，請再試一次');
+      } else {
+        setLinkMsg(err instanceof Error ? err.message : '連結失敗，請稍後再試');
+      }
+    } finally {
+      setLinkLoading(false);
+    }
+  };
 
   const lastSeen = data?.timestamp
     ? new Date(data.timestamp).toLocaleTimeString()
@@ -227,6 +265,49 @@ export default function Dashboard({ user }: Props) {
                     </span>
                   </div>
                 </div>
+
+                {/* Link Google Account — only shown for email/password users */}
+                {hasPasswordProvider && (
+                  <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
+                    <p className="text-gray-400 text-xs font-medium uppercase tracking-wider mb-3">連結 Google 帳號</p>
+                    {hasGoogleLinked ? (
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="text-white text-xs font-medium px-2.5 py-1 rounded-full"
+                          style={{ backgroundColor: '#16a34a' }}
+                        >
+                          ✓ 已連結
+                        </span>
+                        <p className="text-gray-500 text-sm">您的帳號已與 Google 連結</p>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-gray-500 text-sm mb-3">
+                          將您的帳號與 Google 連結，之後可使用 Google 直接登入。
+                        </p>
+                        <button
+                          onClick={handleLinkGoogle}
+                          disabled={linkLoading}
+                          className="flex items-center gap-2 font-semibold text-sm px-4 py-2.5 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                          style={{ backgroundColor: '#111827', color: '#ffffff', border: 'none' }}
+                          onMouseEnter={e => { if (!linkLoading) (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#1f2937'; }}
+                          onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#111827'; }}
+                        >
+                          <GoogleIcon />
+                          {linkLoading ? '連結中…' : '連結 Google 帳號'}
+                        </button>
+                        {linkMsg && (
+                          <p
+                            className="text-sm mt-2"
+                            style={{ color: linkMsg.startsWith('✓') ? '#16a34a' : '#dc2626' }}
+                          >
+                            {linkMsg}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
 
                 <button
                   onClick={() => signOut(auth)}

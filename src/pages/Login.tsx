@@ -1,5 +1,9 @@
 import { useState } from 'react';
-import { signInWithPopup } from 'firebase/auth';
+import {
+  signInWithPopup,
+  signInWithEmailAndPassword,
+  fetchSignInMethodsForEmail,
+} from 'firebase/auth';
 import { auth, googleProvider } from '../firebase';
 
 function PawIcon({ className }: { className?: string }) {
@@ -44,10 +48,54 @@ function GoogleIcon() {
   );
 }
 
-export default function Login() {
-  const [error,   setError]   = useState('');
-  const [loading, setLoading] = useState(false);
+interface Props {
+  onGoToRegister: (prefillEmail?: string) => void;
+}
 
+export default function Login({ onGoToRegister }: Props) {
+  const [email,    setEmail]    = useState('');
+  const [password, setPassword] = useState('');
+  const [error,    setError]    = useState('');
+  const [loading,  setLoading]  = useState(false);
+
+  // Email / password sign in with smart routing
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    const trimmedEmail = email.trim();
+
+    try {
+      // Check if the email exists in Firebase at all
+      const methods = await fetchSignInMethodsForEmail(auth, trimmedEmail);
+
+      if (methods.length === 0) {
+        // Email not registered → go to sign up with prefilled email
+        onGoToRegister(trimmedEmail);
+        return;
+      }
+
+      // Email exists — try to sign in with password
+      await signInWithEmailAndPassword(auth, trimmedEmail, password);
+      // onAuthStateChanged in App.tsx will handle redirect
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        setError('密碼不正確，請再試一次');
+      } else if (code === 'auth/invalid-email') {
+        setError('電子郵件格式不正確');
+      } else if (code === 'auth/too-many-requests') {
+        setError('嘗試次數過多，請稍後再試');
+      } else {
+        setError(err instanceof Error ? err.message : '登入失敗，請稍後再試');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Google sign in
   const handleGoogleLogin = async () => {
     setLoading(true);
     setError('');
@@ -179,6 +227,72 @@ export default function Login() {
             <p style={{ color: '#9ca3af' }}>Sign in to continue to your dashboard</p>
           </div>
 
+          {/* ── Email / Password Form ── */}
+          <form onSubmit={handleEmailLogin} className="space-y-3 mb-5">
+            {/* Email */}
+            <div>
+              <label className="block text-sm font-medium mb-1.5" style={{ color: '#374151' }}>
+                電子郵件
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+                placeholder="your@email.com"
+                className="w-full px-4 py-3 rounded-xl text-sm outline-none transition-all"
+                style={{
+                  border: '1.5px solid #e5e7eb',
+                  color: '#111827',
+                  backgroundColor: '#fafafa',
+                }}
+                onFocus={e => { e.currentTarget.style.borderColor = '#1937E6'; e.currentTarget.style.backgroundColor = '#fff'; }}
+                onBlur={e => { e.currentTarget.style.borderColor = '#e5e7eb'; e.currentTarget.style.backgroundColor = '#fafafa'; }}
+              />
+            </div>
+
+            {/* Password */}
+            <div>
+              <label className="block text-sm font-medium mb-1.5" style={{ color: '#374151' }}>
+                密碼
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                placeholder="輸入密碼"
+                className="w-full px-4 py-3 rounded-xl text-sm outline-none transition-all"
+                style={{
+                  border: '1.5px solid #e5e7eb',
+                  color: '#111827',
+                  backgroundColor: '#fafafa',
+                }}
+                onFocus={e => { e.currentTarget.style.borderColor = '#1937E6'; e.currentTarget.style.backgroundColor = '#fff'; }}
+                onBlur={e => { e.currentTarget.style.borderColor = '#e5e7eb'; e.currentTarget.style.backgroundColor = '#fafafa'; }}
+              />
+            </div>
+
+            {/* Submit */}
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-2 font-semibold text-sm py-3.5 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ backgroundColor: '#1937E6', color: '#ffffff', border: 'none' }}
+              onMouseEnter={e => { if (!loading) (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#1430c4'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#1937E6'; }}
+            >
+              {loading ? '登入中…' : '以電子郵件登入'}
+            </button>
+          </form>
+
+          {/* Divider */}
+          <div className="flex items-center gap-3 mb-5">
+            <div className="flex-1 h-px" style={{ backgroundColor: '#e5e7eb' }} />
+            <span className="text-xs font-medium" style={{ color: '#9ca3af' }}>或</span>
+            <div className="flex-1 h-px" style={{ backgroundColor: '#e5e7eb' }} />
+          </div>
+
           {/* Google Sign-In Button */}
           <button
             type="button"
@@ -201,6 +315,21 @@ export default function Login() {
             {loading ? 'Signing in…' : 'Continue with Google'}
           </button>
 
+          {/* Register link */}
+          <p className="text-center text-sm mt-5" style={{ color: '#9ca3af' }}>
+            還沒有帳號？{' '}
+            <button
+              type="button"
+              onClick={() => onGoToRegister()}
+              className="font-semibold transition-colors"
+              style={{ color: '#1937E6' }}
+              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = '#1430c4'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = '#1937E6'; }}
+            >
+              立即建立帳號
+            </button>
+          </p>
+
           {error && (
             <div
               className="mt-4 text-sm px-4 py-3 rounded-xl"
@@ -214,7 +343,7 @@ export default function Login() {
             </div>
           )}
 
-          <p className="text-center text-xs mt-8" style={{ color: '#9ca3af' }}>
+          <p className="text-center text-xs mt-6" style={{ color: '#9ca3af' }}>
             By signing in, you agree to our Terms of Service and Privacy Policy.
           </p>
         </div>

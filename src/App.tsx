@@ -3,11 +3,16 @@ import { onAuthStateChanged }                    from 'firebase/auth';
 import type { User }                             from 'firebase/auth';
 import { auth }                                  from './firebase';
 import Login     from './pages/Login';
+import Register  from './pages/Register';
 import Dashboard from './pages/Dashboard';
 
+type AuthPage = 'login' | 'register';
+
 export default function App() {
-  const [user,    setUser]    = useState<User | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [user,         setUser]         = useState<User | null>(null);
+  const [loading,      setLoading]      = useState<boolean>(true);
+  const [authPage,     setAuthPage]     = useState<AuthPage>('login');
+  const [prefillEmail, setPrefillEmail] = useState<string>('');
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u: User | null) => {
@@ -16,6 +21,15 @@ export default function App() {
     });
     return unsubscribe;
   }, []);
+
+  const goToRegister = (email?: string) => {
+    setPrefillEmail(email ?? '');
+    setAuthPage('register');
+  };
+
+  const goToLogin = () => {
+    setAuthPage('login');
+  };
 
   if (loading) {
     return (
@@ -33,5 +47,18 @@ export default function App() {
     );
   }
 
-  return user ? <Dashboard user={user} /> : <Login />;
+  if (user) {
+    return <Dashboard user={user} />;
+  }
+
+  if (authPage === 'register') {
+    return (
+      <Register
+        prefillEmail={prefillEmail}
+        onBackToLogin={goToLogin}
+      />
+    );
+  }
+
+  return <Login onGoToRegister={goToRegister} />;
 }
