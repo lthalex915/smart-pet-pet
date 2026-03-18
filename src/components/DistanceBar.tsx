@@ -4,10 +4,10 @@ interface Props {
 }
 
 const ZONES = [
-  { max: 15,  label: '!! CRITICAL',  colour: 'bg-red-500'    },
-  { max: 50,  label: 'NEAR',         colour: 'bg-orange-400'  },
-  { max: 120, label: 'MID-RANGE',    colour: 'bg-yellow-400'  },
-  { max: 300, label: 'FAR',          colour: 'bg-cyan-400'    },
+  { max: 15,  label: '危險',     colour: 'bg-red-500'    },
+  { max: 50,  label: '近距離',   colour: 'bg-orange-400'  },
+  { max: 120, label: '中距離',   colour: 'bg-amber-400'   },
+  { max: 300, label: '遠距離',   colour: 'bg-green-500'   },
 ];
 
 export default function DistanceBar({ distance, noEcho }: Props) {
@@ -20,30 +20,32 @@ export default function DistanceBar({ distance, noEcho }: Props) {
     : null;
 
   return (
-    <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4 space-y-3">
-      <div className="flex justify-between text-xs text-gray-500">
-        <span>PROXIMITY</span>
-        <span>{noEcho ? 'NO SIGNAL' : zone?.label ?? '--'}</span>
+    <div className="bg-white border border-gray-100 rounded-2xl p-5 space-y-3 shadow-sm">
+      <div className="flex justify-between text-xs font-medium">
+        <span className="text-gray-400 uppercase tracking-wider">近距感測</span>
+        <span className={`font-semibold ${noEcho ? 'text-gray-400' : 'text-gray-700'}`}>
+          {noEcho ? '無訊號' : zone?.label ?? '--'}
+        </span>
       </div>
 
-      <div className="relative h-3 bg-gray-800 rounded-full overflow-hidden">
+      <div className="relative h-2.5 bg-gray-100 rounded-full overflow-hidden">
         <div
-          className={`h-full rounded-full transition-all duration-500 ${zone?.colour ?? 'bg-gray-700'}`}
+          className={`h-full rounded-full transition-all duration-500 ${zone?.colour ?? 'bg-gray-300'}`}
           style={{ width: `${pct}%` }}
         />
         {/* tick marks */}
         {[25, 50, 75].map((t) => (
           <div
             key={t}
-            className="absolute top-0 h-full w-px bg-gray-600"
+            className="absolute top-0 h-full w-px bg-gray-200"
             style={{ left: `${t}%` }}
           />
         ))}
       </div>
 
-      <div className="flex justify-between text-xs text-gray-600">
-        <span>300 CM</span>
-        <span>0 CM</span>
+      <div className="flex justify-between text-xs text-gray-400">
+        <span>300 cm</span>
+        <span>0 cm</span>
       </div>
     </div>
   );

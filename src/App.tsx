@@ -19,10 +19,16 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <p className="text-cyan-400 font-mono text-lg animate-pulse">
-          SYSTEM BOOT…
-        </p>
+      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center gap-3">
+        <div className="w-12 h-12 bg-green-500 rounded-2xl flex items-center justify-center shadow-lg">
+          <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+            <circle cx="11" cy="4" r="2" />
+            <circle cx="18" cy="8" r="2" />
+            <circle cx="4" cy="8" r="2" />
+            <path d="M12 22c-4 0-7-3-7-6 0-2 1-4 3-5l2-1 2-1 2 1 2 1c2 1 3 3 3 5 0 3-3 6-7 6z" />
+          </svg>
+        </div>
+        <p className="text-gray-400 text-sm font-medium animate-pulse">載入中…</p>
       </div>
     );
   }
