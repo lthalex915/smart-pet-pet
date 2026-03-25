@@ -1,17 +1,20 @@
-import { useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from 'react';
 import { signOut, linkWithPopup, type User } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase';
 import { useSensorData } from '../hooks/useSensorData';
 import { useRFIDHistory } from '../hooks/useRFIDHistory';
 import { useUserPollInterval } from '../hooks/useUserPollInterval';
+import { useRFIDBinding } from '../hooks/useRFIDBinding';
+import { useBoardConnection } from '../hooks/useBoardConnection';
 import SensorCard from '../components/SensorCard';
-import DistanceBar from '../components/DistanceBar';
+import TempHumidityChart from '../components/TempHumidityChart';
 import RFIDLog from '../components/RFIDLog';
 import { Activity, Radio, Settings, Wifi, WifiOff, LogOut } from 'lucide-react';
 import {
   POLL_INTERVAL_OPTIONS_MS,
   formatPollIntervalLabel,
 } from '../constants/pollInterval';
+import { buildDefaultRFIDName, isSameRFIDUid, normalizeRFIDUid } from '../utils/rfid';
 
 type Tab = 'sensors' | 'rfid' | 'settings';
 
@@ -51,9 +54,64 @@ export default function Dashboard({ user }: Props) {
   const [tab, setTab] = useState<Tab>('sensors');
   const [linkLoading, setLinkLoading] = useState(false);
   const [linkMsg, setLinkMsg] = useState('');
+
+  const [boardIdInput, setBoardIdInput] = useState('');
+  const [boardSaving, setBoardSaving] = useState(false);
+  const [boardMsg, setBoardMsg] = useState('');
+
+  const [rfidUidInput, setRfidUidInput] = useState('');
+  const [rfidNameInput, setRfidNameInput] = useState('');
+  const [rfidSaving, setRfidSaving] = useState(false);
+  const [rfidMsg, setRfidMsg] = useState('');
+
+  const {
+    connection: boardConnection,
+    loading: boardLoading,
+    error: boardError,
+    connectBoard,
+    disconnectBoard,
+  } = useBoardConnection(user.uid);
+
+  const connectedBoardId = boardConnection?.boardId ?? null;
+
   const { pollIntervalMs, setPollIntervalMs } = useUserPollInterval(user.uid);
-  const { data, loading, error } = useSensorData(pollIntervalMs);
-  const { scans } = useRFIDHistory(30, pollIntervalMs);
+  const {
+    data,
+    trend,
+    loading,
+    error,
+  } = useSensorData(user.uid, pollIntervalMs, 24);
+  const {
+    scans,
+    loading: scansLoading,
+    error: scansError,
+  } = useRFIDHistory(user.uid, 30, pollIntervalMs);
+  const {
+    binding,
+    loading: bindingLoading,
+    error: bindingError,
+    upsertBinding,
+    disconnectBinding,
+  } = useRFIDBinding(user.uid);
+
+  const latestScan = scans[0] ?? null;
+
+  useEffect(() => {
+    if (!binding) {
+      return;
+    }
+
+    setRfidUidInput(binding.uid);
+    setRfidNameInput(binding.name);
+  }, [binding]);
+
+  useEffect(() => {
+    if (!boardConnection) {
+      return;
+    }
+
+    setBoardIdInput(boardConnection.boardId);
+  }, [boardConnection]);
 
   // Check if user already has Google linked
   const hasGoogleLinked = user.providerData.some(p => p.providerId === 'google.com');
@@ -80,6 +138,98 @@ export default function Dashboard({ user }: Props) {
     }
   };
 
+  const handleConnectBoard = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBoardMsg('');
+    setBoardSaving(true);
+
+    try {
+      const nextBoardId = boardIdInput.trim();
+      if (!nextBoardId) {
+        throw new Error('請輸入 Board ID');
+      }
+
+      await connectBoard(nextBoardId);
+      setBoardIdInput(nextBoardId);
+      setBoardMsg(`✓ Board 連線成功：${nextBoardId}`);
+    } catch (err: unknown) {
+      setBoardMsg(err instanceof Error ? err.message : 'Board 連線失敗');
+    } finally {
+      setBoardSaving(false);
+    }
+  };
+
+  const handleDisconnectBoard = async () => {
+    setBoardMsg('');
+    setBoardSaving(true);
+
+    try {
+      await disconnectBoard();
+      setBoardIdInput('');
+      setBoardMsg('✓ Board 已中斷連線');
+    } catch (err: unknown) {
+      setBoardMsg(err instanceof Error ? err.message : 'Board 中斷連線失敗');
+    } finally {
+      setBoardSaving(false);
+    }
+  };
+
+  const handleSaveRFIDBinding = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setRfidMsg('');
+    setRfidSaving(true);
+
+    try {
+      const normalizedUid = normalizeRFIDUid(rfidUidInput);
+      if (!normalizedUid) {
+        throw new Error('請輸入 RFID UID');
+      }
+
+      const nextName = (rfidNameInput.trim() || buildDefaultRFIDName(normalizedUid)).slice(0, 32);
+
+      await upsertBinding({
+        uid: normalizedUid,
+        name: nextName,
+      });
+
+      setRfidUidInput(normalizedUid);
+      setRfidNameInput(nextName);
+      setRfidMsg('✓ RFID UID 與名稱已儲存');
+    } catch (err: unknown) {
+      setRfidMsg(err instanceof Error ? err.message : 'RFID 設定儲存失敗');
+    } finally {
+      setRfidSaving(false);
+    }
+  };
+
+  const handleDisconnectRFID = async () => {
+    setRfidMsg('');
+    setRfidSaving(true);
+
+    try {
+      await disconnectBinding();
+      setRfidUidInput('');
+      setRfidNameInput('');
+      setRfidMsg('✓ RFID 已中斷連線');
+    } catch (err: unknown) {
+      setRfidMsg(err instanceof Error ? err.message : 'RFID 中斷連線失敗');
+    } finally {
+      setRfidSaving(false);
+    }
+  };
+
+  const handleUseLatestScannedUid = () => {
+    if (!latestScan) {
+      setRfidMsg('目前沒有可用的 RFID 掃描紀錄');
+      return;
+    }
+
+    const normalizedUid = normalizeRFIDUid(latestScan.uid);
+    setRfidUidInput(normalizedUid);
+    setRfidNameInput((prev) => prev.trim() || buildDefaultRFIDName(normalizedUid));
+    setRfidMsg(`已帶入最新 UID：${normalizedUid}`);
+  };
+
   const lastSeen = data?.timestamp
     ? new Date(data.timestamp).toLocaleTimeString()
     : null;
@@ -88,12 +238,37 @@ export default function Dashboard({ user }: Props) {
     setPollIntervalMs(Number(event.target.value));
   };
 
+  const latestTapStatus = useMemo(() => {
+    if (!latestScan) {
+      return null;
+    }
+
+    if (!binding) {
+      return {
+        tone: 'amber' as const,
+        text: `偵測到 UID ${latestScan.uid}，請先在設定頁完成綁定`,
+      };
+    }
+
+    if (isSameRFIDUid(latestScan.uid, binding.uid)) {
+      return {
+        tone: 'green' as const,
+        text: `Tap successful：${binding.name}（${binding.uid}）`,
+      };
+    }
+
+    return {
+      tone: 'red' as const,
+      text: `偵測到 UID ${latestScan.uid}，與已綁定 UID ${binding.uid} 不符，不觸發功能`,
+    };
+  }, [binding, latestScan]);
+
   const BLUE = '#1937E6';
 
   const navItems = [
-    { id: 'sensors'  as Tab, Icon: Activity, label: '感測器' },
-    { id: 'rfid'     as Tab, Icon: Radio,    label: 'RFID'   },
-    { id: 'settings' as Tab, Icon: Settings, label: '設定'   },
+    { id: 'sensors' as Tab, Icon: Activity, label: '感測器' },
+    { id: 'rfid' as Tab, Icon: Radio, label: 'RFID' },
+    { id: 'settings' as Tab, Icon: Settings, label: '設定' },
   ] as const;
 
   return (
@@ -135,13 +310,13 @@ export default function Dashboard({ user }: Props) {
             ) : (
               <span className="text-gray-400 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full inline-block" />
-                等待裝置連線
+                等待感測器資料
               </span>
             )}
           </p>
         </div>
         {data
-          ? <Wifi    className="w-5 h-5" style={{ color: BLUE }} />
+          ? <Wifi className="w-5 h-5" style={{ color: BLUE }} />
           : <WifiOff className="text-gray-300 w-5 h-5" />}
       </header>
 
@@ -188,20 +363,16 @@ export default function Dashboard({ user }: Props) {
                 {/* Page title */}
                 <div>
                   <h2 className="text-xl font-bold text-gray-900">感測器數據</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">即時環境監測</p>
+                  <p className="text-sm text-gray-400 mt-0.5">即時環境監測（僅顯示溫度與濕度）</p>
                 </div>
 
-                {/* Sensor cards grid — 3 cols on mobile, up to 4 on desktop */}
-                <div className="grid grid-cols-3 md:grid-cols-3 xl:grid-cols-3 gap-3 md:gap-4">
-                  <SensorCard
-                    label="距離"
-                    value={data?.noEcho || data?.distance == null
-                      ? '--'
-                      : data.distance.toFixed(1)}
-                    unit="CM"
-                    warn={data?.noEcho ?? false}
-                    loading={loading}
-                  />
+                {!loading && !data && (
+                  <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-amber-50 border-amber-100 text-amber-700">
+                    尚未收到感測器資料，請確認裝置是否已開始推送資料。
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3 md:gap-4">
                   <SensorCard
                     label="溫度"
                     value={data?.temperature != null
@@ -220,26 +391,52 @@ export default function Dashboard({ user }: Props) {
                   />
                 </div>
 
-                <DistanceBar
-                  distance={data?.distance ?? null}
-                  noEcho={data?.noEcho ?? true}
-                />
+                <TempHumidityChart trend={trend} loading={loading} />
 
                 {data?.deviceId && (
                   <p className="text-gray-400 text-xs text-right">
-                    裝置 ID：{data.deviceId}
+                    目前來源 Board ID：{data.deviceId}
                   </p>
                 )}
               </div>
             )}
 
             {tab === 'rfid' && (
-              <div>
-                <div className="mb-4">
+              <div className="space-y-4">
+                <div>
                   <h2 className="text-xl font-bold text-gray-900">RFID 紀錄</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">掃描歷史記錄</p>
+                  <p className="text-sm text-gray-400 mt-0.5">僅已綁定 UID 可觸發功能（目前僅顯示 tap 成功訊息）</p>
                 </div>
-                <RFIDLog scans={scans} />
+
+                {binding && (
+                  <div className="bg-white border border-blue-100 rounded-2xl px-4 py-3 text-sm text-blue-700 shadow-sm">
+                    已綁定：<span className="font-semibold">{binding.name}</span>（UID: {binding.uid}）
+                  </div>
+                )}
+
+                {latestTapStatus && (
+                  <div
+                    className={`rounded-2xl px-4 py-3 text-sm border shadow-sm ${
+                      latestTapStatus.tone === 'green'
+                        ? 'bg-green-50 border-green-100 text-green-700'
+                        : latestTapStatus.tone === 'amber'
+                          ? 'bg-amber-50 border-amber-100 text-amber-700'
+                          : 'bg-red-50 border-red-100 text-red-700'
+                    }`}
+                  >
+                    {latestTapStatus.text}
+                  </div>
+                )}
+
+                {scansLoading && (
+                  <p className="text-xs text-gray-400 animate-pulse">讀取 RFID 紀錄中…</p>
+                )}
+
+                {scansError && (
+                  <p className="text-xs text-red-500">{scansError}</p>
+                )}
+
+                <RFIDLog scans={scans} binding={binding} />
               </div>
             )}
 
@@ -247,7 +444,7 @@ export default function Dashboard({ user }: Props) {
               <div className="space-y-4 max-w-lg">
                 <div className="mb-2">
                   <h2 className="text-xl font-bold text-gray-900">設定</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">帳戶與系統設定</p>
+                  <p className="text-sm text-gray-400 mt-0.5">帳戶、Board 連線、同步頻率與 RFID 綁定</p>
                 </div>
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
@@ -261,6 +458,68 @@ export default function Dashboard({ user }: Props) {
                     </div>
                     <p className="text-gray-700 text-sm font-medium">{user.email}</p>
                   </div>
+                </div>
+
+                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">Board 連線</p>
+
+                  <p className="text-xs text-gray-500">
+                    目前狀態：{
+                      boardLoading
+                        ? '讀取中…'
+                        : connectedBoardId
+                          ? `已連線 ${connectedBoardId}`
+                          : '尚未連線'
+                    }
+                  </p>
+
+                  <form className="space-y-3" onSubmit={handleConnectBoard}>
+                    <div>
+                      <label htmlFor="board-id" className="text-gray-500 text-xs mb-1 block">Board ID</label>
+                      <input
+                        id="board-id"
+                        value={boardIdInput}
+                        onChange={(event) => setBoardIdInput(event.target.value)}
+                        placeholder="例如：arduino-mega-01"
+                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        autoComplete="off"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="submit"
+                        disabled={boardSaving}
+                        className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                        style={{ backgroundColor: BLUE }}
+                      >
+                        {boardSaving ? '連線中…' : '連線 Board'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleDisconnectBoard}
+                        disabled={!connectedBoardId || boardSaving}
+                        className="text-sm font-medium px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        中斷 Board
+                      </button>
+                    </div>
+                  </form>
+
+                  {(boardMsg || boardError) && (
+                    <p
+                      className="text-sm"
+                      style={{
+                        color:
+                          (boardMsg && boardMsg.startsWith('✓'))
+                            ? '#16a34a'
+                            : '#dc2626',
+                      }}
+                    >
+                      {boardMsg || boardError}
+                    </p>
+                  )}
                 </div>
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
@@ -291,6 +550,83 @@ export default function Dashboard({ user }: Props) {
                       目前每 {formatPollIntervalLabel(pollIntervalMs)}
                     </span>
                   </div>
+                </div>
+
+                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">RFID 綁定設定</p>
+
+                  <p className="text-xs text-gray-500">
+                    目前狀態：{bindingLoading ? '讀取中…' : binding ? `已連結 ${binding.name}（${binding.uid}）` : '尚未連結'}
+                  </p>
+
+                  <form className="space-y-3" onSubmit={handleSaveRFIDBinding}>
+                    <div>
+                      <label htmlFor="rfid-uid" className="text-gray-500 text-xs mb-1 block">RFID UID</label>
+                      <input
+                        id="rfid-uid"
+                        value={rfidUidInput}
+                        onChange={(event) => setRfidUidInput(event.target.value)}
+                        placeholder="例如：DE AD BE EF"
+                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        autoComplete="off"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="rfid-name" className="text-gray-500 text-xs mb-1 block">卡片名稱（可重新命名）</label>
+                      <input
+                        id="rfid-name"
+                        value={rfidNameInput}
+                        onChange={(event) => setRfidNameInput(event.target.value)}
+                        maxLength={32}
+                        placeholder="例如：主卡 / 飼主卡"
+                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        autoComplete="off"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="submit"
+                        disabled={rfidSaving}
+                        className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                        style={{ backgroundColor: BLUE }}
+                      >
+                        {rfidSaving ? '儲存中…' : '儲存 UID / 名稱'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleUseLatestScannedUid}
+                        className="text-sm font-medium px-4 py-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50"
+                      >
+                        使用最新掃描 UID
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleDisconnectRFID}
+                        disabled={!binding || rfidSaving}
+                        className="text-sm font-medium px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        中斷連線
+                      </button>
+                    </div>
+                  </form>
+
+                  {(rfidMsg || bindingError) && (
+                    <p
+                      className="text-sm"
+                      style={{
+                        color:
+                          (rfidMsg && rfidMsg.startsWith('✓'))
+                            ? '#16a34a'
+                            : '#dc2626',
+                      }}
+                    >
+                      {rfidMsg || bindingError}
+                    </p>
+                  )}
                 </div>
 
                 {/* Link Google Account — only shown for email/password users */}
@@ -359,7 +695,7 @@ export default function Dashboard({ user }: Props) {
           <button
             key={id}
             onClick={() => setTab(id)}
-            className={`flex-1 flex flex-col items-center py-3 gap-1 text-xs font-medium transition-colors`}
+            className="flex-1 flex flex-col items-center py-3 gap-1 text-xs font-medium transition-colors"
             style={tab === id ? { color: BLUE } : { color: '#9ca3af' }}
           >
             <Icon className={`w-5 h-5 ${tab === id ? 'stroke-2' : ''}`} />

@@ -1,40 +1,92 @@
-// src/hooks/useRFIDHistory.ts
 import { useEffect, useState } from 'react';
-import { ref, get, query, orderByChild, limitToLast } from 'firebase/database';
+import { get, limitToLast, orderByChild, query, ref } from 'firebase/database';
 import type { DataSnapshot, Query } from 'firebase/database';
 import { db } from '../firebase';
 import type { RFIDScan } from '../types/sensor';
 import { DEFAULT_POLL_INTERVAL_MS } from '../constants/pollInterval';
+import { legacyRFIDScansPath, userRFIDScansPath } from '../constants/dbPaths';
 
-export function useRFIDHistory(limit = 30, pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS) {
+async function getSafe<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise;
+  } catch {
+    return null;
+  }
+}
+
+export function useRFIDHistory(
+  uid: string | null | undefined,
+  limit = 30,
+  pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS,
+) {
   const [scans, setScans] = useState<RFIDScan[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
 
-    const q: Query = query(
-      ref(db, 'rfidScans'),
+    if (!uid) {
+      setScans([]);
+      setError(null);
+      setLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    const userQuery: Query = query(
+      ref(db, userRFIDScansPath(uid)),
       orderByChild('timestamp'),
       limitToLast(limit),
     );
 
+    const legacyQuery: Query = query(
+      ref(db, legacyRFIDScansPath()),
+      orderByChild('timestamp'),
+      limitToLast(limit),
+    );
+
+    const parseScans = (snapshot: DataSnapshot): RFIDScan[] => {
+      const items: RFIDScan[] = [];
+
+      snapshot.forEach((child: DataSnapshot) => {
+        const value = child.val() as Omit<RFIDScan, 'id'>;
+
+        items.unshift({
+          id: child.key as string,
+          ...value,
+        });
+      });
+
+      return items;
+    };
+
     const fetchRFIDHistory = async () => {
       try {
-        const snapshot = await get(q);
+        const [userSnapshot, legacySnapshot] = await Promise.all([
+          getSafe(get(userQuery)),
+          getSafe(get(legacyQuery)),
+        ]);
+
+        const snapshot =
+          userSnapshot?.exists()
+            ? userSnapshot
+            : legacySnapshot?.exists()
+              ? legacySnapshot
+              : userSnapshot ?? legacySnapshot ?? null;
         if (!active) {
           return;
         }
 
-        const items: RFIDScan[] = [];
-        snapshot.forEach((child: DataSnapshot) => {
-          items.unshift({
-            id: child.key as string,
-            ...(child.val() as Omit<RFIDScan, 'id'>),
-          });
-        });
+        setScans(snapshot ? parseScans(snapshot) : []);
+        setError(null);
+      } catch (err: unknown) {
+        if (!active) {
+          return;
+        }
 
-        setScans(items);
+        setError(err instanceof Error ? err.message : '讀取 RFID 紀錄失敗');
       } finally {
         if (active) {
           setLoading(false);
@@ -53,7 +105,7 @@ export function useRFIDHistory(limit = 30, pollIntervalMs: number = DEFAULT_POLL
       active = false;
       window.clearInterval(timerId);
     };
-  }, [limit, pollIntervalMs]);
+  }, [uid, limit, pollIntervalMs]);
 
-  return { scans, loading };
+  return { scans, loading, error };
 }
