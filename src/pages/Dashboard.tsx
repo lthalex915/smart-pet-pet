@@ -1,12 +1,17 @@
-import { useState } from 'react';
+import { useState, type ChangeEvent } from 'react';
 import { signOut, linkWithPopup, type User } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase';
-import { useSensorData }   from '../hooks/useSensorData';
-import { useRFIDHistory }  from '../hooks/useRFIDHistory';
-import SensorCard   from '../components/SensorCard';
-import DistanceBar  from '../components/DistanceBar';
-import RFIDLog      from '../components/RFIDLog';
+import { useSensorData } from '../hooks/useSensorData';
+import { useRFIDHistory } from '../hooks/useRFIDHistory';
+import { useUserPollInterval } from '../hooks/useUserPollInterval';
+import SensorCard from '../components/SensorCard';
+import DistanceBar from '../components/DistanceBar';
+import RFIDLog from '../components/RFIDLog';
 import { Activity, Radio, Settings, Wifi, WifiOff, LogOut } from 'lucide-react';
+import {
+  POLL_INTERVAL_OPTIONS_MS,
+  formatPollIntervalLabel,
+} from '../constants/pollInterval';
 
 type Tab = 'sensors' | 'rfid' | 'settings';
 
@@ -43,11 +48,12 @@ function GoogleIcon() {
 }
 
 export default function Dashboard({ user }: Props) {
-  const [tab,         setTab]         = useState<Tab>('sensors');
+  const [tab, setTab] = useState<Tab>('sensors');
   const [linkLoading, setLinkLoading] = useState(false);
-  const [linkMsg,     setLinkMsg]     = useState('');
-  const { data, loading, error } = useSensorData();
-  const { scans }               = useRFIDHistory();
+  const [linkMsg, setLinkMsg] = useState('');
+  const { pollIntervalMs, setPollIntervalMs } = useUserPollInterval(user.uid);
+  const { data, loading, error } = useSensorData(pollIntervalMs);
+  const { scans } = useRFIDHistory(30, pollIntervalMs);
 
   // Check if user already has Google linked
   const hasGoogleLinked = user.providerData.some(p => p.providerId === 'google.com');
@@ -77,6 +83,10 @@ export default function Dashboard({ user }: Props) {
   const lastSeen = data?.timestamp
     ? new Date(data.timestamp).toLocaleTimeString()
     : null;
+
+  const handlePollIntervalChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    setPollIntervalMs(Number(event.target.value));
+  };
 
   const BLUE = '#1937E6';
 
@@ -119,7 +129,7 @@ export default function Dashboard({ user }: Props) {
             ) : data ? (
               <span className="flex items-center gap-1.5" style={{ color: BLUE }}>
                 <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ backgroundColor: BLUE }} />
-                即時更新
+                即時更新（每 {formatPollIntervalLabel(pollIntervalMs)}）
                 <span className="text-gray-400">· {lastSeen}</span>
               </span>
             ) : (
@@ -255,13 +265,30 @@ export default function Dashboard({ user }: Props) {
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
                   <p className="text-gray-400 text-xs font-medium uppercase tracking-wider mb-3">Firebase 推送間隔</p>
-                  <div className="flex items-center justify-between">
-                    <p className="text-gray-700 text-sm">每 30 秒</p>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="flex-1">
+                      <label htmlFor="poll-interval" className="text-gray-500 text-xs mb-1 block">
+                        更新頻率
+                      </label>
+                      <select
+                        id="poll-interval"
+                        value={pollIntervalMs}
+                        onChange={handlePollIntervalChange}
+                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      >
+                        {POLL_INTERVAL_OPTIONS_MS.map((ms) => (
+                          <option key={ms} value={ms}>
+                            {formatPollIntervalLabel(ms)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
                     <span
-                      className="text-white text-xs font-medium px-2.5 py-1 rounded-full"
+                      className="text-white text-xs font-medium px-2.5 py-1 rounded-full self-start sm:self-auto"
                       style={{ backgroundColor: BLUE }}
                     >
-                      正常
+                      目前每 {formatPollIntervalLabel(pollIntervalMs)}
                     </span>
                   </div>
                 </div>
