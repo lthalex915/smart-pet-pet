@@ -157,8 +157,8 @@ bool          blinkState       = true;
 const unsigned long DISTANCE_INTERVAL        = 300;
 const unsigned long OLED_INTERVAL            = 150;
 const unsigned long BLINK_INTERVAL           = 500;
-const unsigned long DHT_INTERVAL             = 5000;
-const unsigned long FIREBASE_SENSOR_INTERVAL = 30000;
+const unsigned long DHT_INTERVAL             = 3000;
+const unsigned long FIREBASE_SENSOR_INTERVAL = 3000;
 
 
 // ═══════════════════════════════════════════════════════════
@@ -877,7 +877,7 @@ void loop() {
     readDistance();
   }
 
-  // ── DHT11 reading every 5 s ────────────────────────────
+  // ── DHT11 reading every 3 s ────────────────────────────
   if (now - lastDHTTime >= DHT_INTERVAL) {
     lastDHTTime = now;
     readDHT();
