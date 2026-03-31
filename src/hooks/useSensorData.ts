@@ -38,6 +38,8 @@ function normalizeSensorData(value: SensorData | null): SensorData | null {
     noEcho: Boolean(value.noEcho),
     temperature: typeof value.temperature === 'number' ? value.temperature : null,
     humidity: typeof value.humidity === 'number' ? value.humidity : null,
+    weight: typeof value.weight === 'number' ? value.weight : null,
+    hasFood: Boolean(value.hasFood),
     timestamp: Number(value.timestamp ?? 0),
   };
 }

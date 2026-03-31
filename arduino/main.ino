@@ -1,7 +1,7 @@
 /*************************************************************
- * COMBINED: RFID-RC522 + HC-SR04 + DHT11 + SSD1306 OLED + ESP8266 + FAN
+ * COMBINED: RFID-RC522 + HC-SR04 + DHT11 + HX711 + SSD1306 OLED + ESP8266 + FAN
  * TARGET: Arduino Mega 2560
- * THEME: Cyberpunk HUD  v1.3
+ * THEME: Cyberpunk HUD  v1.4
  *
  * --- RFID RC522 WIRING ---
  *  RC522 SDA  → Mega Pin 53
@@ -31,6 +31,12 @@
  *  DHT11 GND  → Mega GND
  *  Note: Add 10kΩ pull-up resistor between DATA pin and VCC
  *
+ * --- HX711 WIRING ---
+ *  HX711 DT   → Mega Pin 2
+ *  HX711 SCK  → Mega Pin 3
+ *  HX711 VCC  → Mega 5V
+ *  HX711 GND  → Mega GND
+ *
  * --- ESP8266 WIRING ---
  *  ESP8266 TX    → Mega Pin 19  (RX1 — Hardware Serial1)
  *  ESP8266 RX    → Mega Pin 18  (TX1) via voltage divider:
@@ -54,6 +60,7 @@
  *  - Adafruit SSD1306
  *  - Adafruit GFX Library
  *  - DHT sensor library by Adafruit
+ *  - HX711 Arduino Library
  *
  * COMBINED HUD LAYOUT (128×64):
  *  ┌─ >> SENSOR HUD ──────────── WiF─┐
@@ -72,6 +79,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <DHT.h>
+#include <HX711.h>
 
 // ── Wi-Fi Credentials ──────────────────────────────────────
 #define WIFI_SSID  "EE3070_P1615_1"
@@ -99,6 +107,12 @@ const float SOUND_SPEED = 0.0343;
 #define DHT_PIN   24
 #define DHT_TYPE  DHT11
 
+// ── HX711 Load Cell ────────────────────────────────────────
+const int   LOADCELL_DOUT_PIN           = 2;
+const int   LOADCELL_SCK_PIN            = 3;
+const float LOADCELL_CALIBRATION_FACTOR = 1000.0;  // Adjust after calibration
+const float FOOD_PRESENT_THRESHOLD_G    = 10.0;    // >= 10g considered "food exists"
+
 // ── Fan (N-MOSFET module, ZP5S4010H) ──────────────────────
 const int FAN_PIN  = 6;   // PWM-capable pin → MOSFET Signal input
 int       fanSpeed = 0;   // Current speed 0–100 %
@@ -122,10 +136,14 @@ MFRC522            rfid(PIN_RFID_SS, PIN_RFID_RST);
 MFRC522::MIFARE_Key key;
 Adafruit_SSD1306   oled(OLED_W, OLED_H, &Wire, OLED_RESET);
 DHT                dht(DHT_PIN, DHT_TYPE);
+HX711              scale;
 
 // ── Sensor State ───────────────────────────────────────────
-float lastDistance = -1.0;
-bool  noEcho       = true;
+float lastDistance        = -1.0;
+bool  noEcho              = true;
+float foodWeightGram      = NAN;
+bool  loadCellOK          = false;
+bool  hasFoodInContainer  = false;
 
 // ── RFID State ─────────────────────────────────────────────
 char               rfidUID[30]  = "";
@@ -151,6 +169,7 @@ unsigned long lastDistanceTime = 0;
 unsigned long lastOledTime     = 0;
 unsigned long lastBlinkTime    = 0;
 unsigned long lastDHTTime      = 0;
+unsigned long lastWeightTime   = 0;
 unsigned long lastFirebasePush = 0;
 bool          blinkState       = true;
 
@@ -158,6 +177,7 @@ const unsigned long DISTANCE_INTERVAL        = 300;
 const unsigned long OLED_INTERVAL            = 150;
 const unsigned long BLINK_INTERVAL           = 500;
 const unsigned long DHT_INTERVAL             = 3000;
+const unsigned long WEIGHT_INTERVAL          = 1500;
 const unsigned long FIREBASE_SENSOR_INTERVAL = 3000;
 
 
@@ -452,6 +472,13 @@ void firebasePushSensorLatest() {
   if (!dhtOK || isnan(dhtHumidity)) payload += "null";
   else                              payload += String(dhtHumidity, 0);
   payload += ",";
+  payload += "\"weight\":";
+  if (!loadCellOK || isnan(foodWeightGram)) payload += "null";
+  else                                       payload += String(foodWeightGram, 1);
+  payload += ",";
+  payload += "\"hasFood\":";
+  payload += (hasFoodInContainer ? "true" : "false");
+  payload += ",";
   payload += "\"timestamp\":{\".sv\":\"timestamp\"}";
   payload += "}";
 
@@ -719,6 +746,39 @@ void readDHT() {
 
 
 // ═══════════════════════════════════════════════════════════
+//  HX711: Food Weight Reading
+// ═══════════════════════════════════════════════════════════
+
+void readFoodWeight() {
+  if (!loadCellOK) {
+    return;
+  }
+
+  if (!scale.is_ready()) {
+    foodWeightGram = NAN;
+    hasFoodInContainer = false;
+    Serial.println(F("[HX711] Not ready — check wiring."));
+    return;
+  }
+
+  float rawWeight = scale.get_units(10);
+
+  // Clamp tiny negative noise values to zero.
+  if (rawWeight < 0 && rawWeight > -2.0) {
+    rawWeight = 0.0;
+  }
+
+  foodWeightGram = rawWeight;
+  hasFoodInContainer = foodWeightGram >= FOOD_PRESENT_THRESHOLD_G;
+
+  Serial.print(F("[HX711] Weight: "));
+  Serial.print(foodWeightGram, 1);
+  Serial.print(F(" g  |  Food status: "));
+  Serial.println(hasFoodInContainer ? F("HAS FOOD") : F("EMPTY"));
+}
+
+
+// ═══════════════════════════════════════════════════════════
 //  RFID: Card Reading
 // ═══════════════════════════════════════════════════════════
 
@@ -771,8 +831,8 @@ void setup() {
   while (!Serial && millis() < 3000);
 
   Serial.println(F("============================================"));
-  Serial.println(F(" RFID + HC-SR04 + DHT11 + OLED + ESP + FAN "));
-  Serial.println(F("           CYBERPUNK HUD  v1.3              "));
+  Serial.println(F("RFID + HC-SR04 + DHT11 + HX711 + OLED + ESP + FAN"));
+  Serial.println(F("           CYBERPUNK HUD  v1.4              "));
   Serial.println(F("============================================"));
   Serial.println(F("[FAN] Type 0-100 and Enter to set fan speed."));
 
@@ -806,6 +866,23 @@ void setup() {
   Serial.print(F("[DHT] DHT11 "));
   Serial.println(dhtOK ? F("ready.") : F("FAIL — check wiring!"));
 
+  // ── HX711 ─────────────────────────────────────────────
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(LOADCELL_CALIBRATION_FACTOR);
+  Serial.println(F("[HX711] Taring... keep container empty."));
+  delay(1500);
+
+  if (scale.is_ready()) {
+    scale.tare();
+    loadCellOK = true;
+    readFoodWeight();
+  } else {
+    loadCellOK = false;
+    foodWeightGram = NAN;
+    hasFoodInContainer = false;
+    Serial.println(F("[HX711 FAIL] HX711 not ready — check wiring!"));
+  }
+
   // ── OLED ──────────────────────────────────────────────
   Wire.begin();
   Wire.setClock(400000);
@@ -818,7 +895,7 @@ void setup() {
     Serial.print(F("[OLED PASS] SSD1306 at 0x")); Serial.println(OLED_ADDR, HEX);
 
     oled.clearDisplay();
-    drawHeader(">> SYS BOOT v1.3");
+    drawHeader(">> SYS BOOT v1.4");
     oled.setTextSize(1);
     oled.setTextColor(SSD1306_WHITE);
     oled.setCursor(4, 14); oled.print(F("> MFRC522  "));
@@ -826,7 +903,8 @@ void setup() {
     oled.setCursor(4, 24); oled.print(F("> HC-SR04  [OK]"));
     oled.setCursor(4, 34); oled.print(F("> DHT11    "));
     oled.print(dhtOK ? F("[OK]") : F("[FAIL]"));
-    oled.setCursor(4, 44); oled.print(F("> SSD1306  [OK]"));
+    oled.setCursor(4, 44); oled.print(F("> HX711    "));
+    oled.print(loadCellOK ? F("[OK]") : F("[FAIL]"));
     oled.setCursor(4, 54); oled.print(F("> ESP8266  INIT..."));
     oled.display();
   }
@@ -852,6 +930,7 @@ void setup() {
   }
 
   lastDHTTime = millis();
+  lastWeightTime = millis();
 }
 
 
@@ -881,6 +960,12 @@ void loop() {
   if (now - lastDHTTime >= DHT_INTERVAL) {
     lastDHTTime = now;
     readDHT();
+  }
+
+  // ── HX711 food weight reading ──────────────────────────
+  if (now - lastWeightTime >= WEIGHT_INTERVAL) {
+    lastWeightTime = now;
+    readFoodWeight();
   }
 
   // ── Firebase push (for Web App realtime display) ───────

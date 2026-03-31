@@ -4,6 +4,8 @@ export interface SensorData {
   noEcho: boolean;
   temperature: number | null;
   humidity: number | null;
+  weight: number | null;
+  hasFood: boolean;
   timestamp: number;
 }
 

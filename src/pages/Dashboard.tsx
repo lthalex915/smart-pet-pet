@@ -363,7 +363,7 @@ export default function Dashboard({ user }: Props) {
                 {/* Page title */}
                 <div>
                   <h2 className="text-xl font-bold text-gray-900">感測器數據</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">即時環境監測（僅顯示溫度與濕度）</p>
+                  <p className="text-sm text-gray-400 mt-0.5">即時環境監測（溫度、濕度與飼料重量）</p>
                 </div>
 
                 {!loading && !data && (
@@ -372,7 +372,7 @@ export default function Dashboard({ user }: Props) {
                   </div>
                 )}
 
-                <div className="grid grid-cols-2 gap-3 md:gap-4">
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
                   <SensorCard
                     label="溫度"
                     value={data?.temperature != null
@@ -389,7 +389,32 @@ export default function Dashboard({ user }: Props) {
                     unit="%"
                     loading={loading}
                   />
+                  <SensorCard
+                    label="飼料重量"
+                    value={data?.weight != null
+                      ? data.weight.toFixed(1)
+                      : '--'}
+                    unit="g"
+                    loading={loading}
+                  />
+                  <SensorCard
+                    label="飼料狀態"
+                    value={data
+                      ? data.hasFood
+                        ? '有'
+                        : '無'
+                      : '--'}
+                    unit="容器內"
+                    loading={loading}
+                    warn={!loading && !!data && !data.hasFood}
+                  />
                 </div>
+
+                {!loading && data && !data.hasFood && (
+                  <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-red-50 border-red-100 text-red-700">
+                    偵測到飼料不足，請補充飼料。
+                  </div>
+                )}
 
                 <TempHumidityChart trend={trend} loading={loading} />
 
