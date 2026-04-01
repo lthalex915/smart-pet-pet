@@ -22,3 +22,11 @@ export function legacySensorsHistoryPath(): string {
 export function legacyRFIDScansPath(): string {
   return 'rfidScans';
 }
+
+export function userFanSettingsPath(uid: string): string {
+  return `users/${uid}/fan/settings`;
+}
+
+export function legacyFanSettingsPath(): string {
+  return 'fan/settings';
+}

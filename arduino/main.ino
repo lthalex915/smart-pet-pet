@@ -114,8 +114,13 @@ const float LOADCELL_CALIBRATION_FACTOR = 1000.0;  // Adjust after calibration
 const float FOOD_PRESENT_THRESHOLD_G    = 10.0;    // >= 10g considered "food exists"
 
 // ── Fan (N-MOSFET module, ZP5S4010H) ──────────────────────
-const int FAN_PIN  = 6;   // PWM-capable pin → MOSFET Signal input
-int       fanSpeed = 0;   // Current speed 0–100 %
+const int FAN_PIN  = 6;    // PWM-capable pin → MOSFET Signal input
+int       fanSpeed = 0;    // Actual output speed 0–100 %
+bool      fanManualOn = false;
+int       fanManualPercent = 100;  // Frontend manual ON uses 100%
+bool      fanAutoEnabled = true;
+float     fanAutoThresholdC = 27.0;
+bool      fanAutoTriggered = false;
 
 // ── OLED Config ────────────────────────────────────────────
 #define OLED_W      128
@@ -171,14 +176,16 @@ unsigned long lastBlinkTime    = 0;
 unsigned long lastDHTTime      = 0;
 unsigned long lastWeightTime   = 0;
 unsigned long lastFirebasePush = 0;
+unsigned long lastFanControlPull = 0;
 bool          blinkState       = true;
 
-const unsigned long DISTANCE_INTERVAL        = 300;
-const unsigned long OLED_INTERVAL            = 150;
-const unsigned long BLINK_INTERVAL           = 500;
-const unsigned long DHT_INTERVAL             = 3000;
-const unsigned long WEIGHT_INTERVAL          = 1500;
-const unsigned long FIREBASE_SENSOR_INTERVAL = 3000;
+const unsigned long DISTANCE_INTERVAL             = 300;
+const unsigned long OLED_INTERVAL                 = 150;
+const unsigned long BLINK_INTERVAL                = 500;
+const unsigned long DHT_INTERVAL                  = 3000;
+const unsigned long WEIGHT_INTERVAL               = 1500;
+const unsigned long FIREBASE_SENSOR_INTERVAL      = 3000;
+const unsigned long FIREBASE_FAN_CONTROL_INTERVAL = 2500;
 
 
 // ═══════════════════════════════════════════════════════════
@@ -186,26 +193,62 @@ const unsigned long FIREBASE_SENSOR_INTERVAL = 3000;
 // ═══════════════════════════════════════════════════════════
 
 void setFanSpeed(int percent) {
-  fanSpeed = constrain(percent, 0, 100);
+  int safePercent = constrain(percent, 0, 100);
+  if (fanSpeed == safePercent) {
+    return;
+  }
+
+  fanSpeed = safePercent;
   int pwmValue = map(fanSpeed, 0, 100, 0, 255);
   analogWrite(FAN_PIN, pwmValue);
+
   Serial.print(F("[FAN] Speed set to "));
   Serial.print(fanSpeed);
   Serial.println(F("%"));
 }
 
-// Called every loop() — non-blocking serial read
-void checkSerialFanInput() {
-  if (Serial.available() > 0) {
-    String input = Serial.readStringUntil('\n');
-    input.trim();
-    int value = input.toInt();
-    if (value >= 0 && value <= 100) {
-      setFanSpeed(value);
-    } else {
-      Serial.println(F("[FAN] Please enter a value between 0 and 100."));
-    }
+void applyFanControlLogic() {
+  fanAutoTriggered = fanAutoEnabled && dhtOK && !isnan(dhtTemp) && dhtTemp >= fanAutoThresholdC;
+
+  int targetSpeed = 0;
+  if (fanManualOn) {
+    targetSpeed = fanManualPercent;
   }
+  if (fanAutoTriggered) {
+    // Temperature-triggered mode forces fan ON.
+    targetSpeed = max(targetSpeed, 100);
+  }
+
+  setFanSpeed(targetSpeed);
+}
+
+// Called every loop() — non-blocking serial read
+// Debug helper for USB serial monitor: type 0~100 then Enter.
+void checkSerialFanInput() {
+  if (Serial.available() <= 0) {
+    return;
+  }
+
+  String input = Serial.readStringUntil('\n');
+  input.trim();
+  if (input.length() == 0) {
+    return;
+  }
+
+  int value = input.toInt();
+  if (value < 0 || value > 100) {
+    Serial.println(F("[FAN] Please enter a value between 0 and 100."));
+    return;
+  }
+
+  fanManualPercent = value;
+  fanManualOn = (value > 0);
+  Serial.print(F("[FAN] Manual control from Serial: "));
+  Serial.print(fanManualOn ? F("ON ") : F("OFF "));
+  Serial.print(fanManualPercent);
+  Serial.println(F("%"));
+
+  applyFanControlLogic();
 }
 
 
@@ -382,7 +425,8 @@ bool espOpenFirebaseSocket(String* responseOut) {
   return false;
 }
 
-bool espHttpJsonRequest(const char* method, const String& path, const String& payload) {
+bool espHttpJsonRequest(const char* method, const String& path, const String& payload,
+                        String* responseOut = NULL) {
   if (!wifiConnected) {
     Serial.println(F("[FB WARN] Skip push — WiFi is not connected."));
     return false;
@@ -451,7 +495,179 @@ bool espHttpJsonRequest(const char* method, const String& path, const String& pa
     Serial.print(F("[FB WARN] HTTP response: "));
     Serial.println(resp);
   }
+  if (responseOut) {
+    *responseOut = resp;
+  }
+
   return ok;
+}
+
+int jsonFindKeyColon(const String& json, const char* key) {
+  String token = String("\"") + key + "\"";
+  int keyPos = json.indexOf(token);
+  if (keyPos < 0) {
+    return -1;
+  }
+
+  return json.indexOf(':', keyPos + token.length());
+}
+
+int jsonSkipSpace(const String& text, int idx) {
+  while (idx < text.length()) {
+    char c = text[idx];
+    if (c != ' ' && c != '\n' && c != '\r' && c != '\t') {
+      break;
+    }
+    idx++;
+  }
+  return idx;
+}
+
+bool jsonReadBool(const String& json, const char* key, bool* outValue) {
+  int colon = jsonFindKeyColon(json, key);
+  if (colon < 0) {
+    return false;
+  }
+
+  int start = jsonSkipSpace(json, colon + 1);
+  if (start >= json.length()) {
+    return false;
+  }
+
+  if (json.startsWith("true", start)) {
+    *outValue = true;
+    return true;
+  }
+
+  if (json.startsWith("false", start)) {
+    *outValue = false;
+    return true;
+  }
+
+  return false;
+}
+
+bool jsonReadFloat(const String& json, const char* key, float* outValue) {
+  int colon = jsonFindKeyColon(json, key);
+  if (colon < 0) {
+    return false;
+  }
+
+  int start = jsonSkipSpace(json, colon + 1);
+  if (start >= json.length()) {
+    return false;
+  }
+
+  bool quoted = false;
+  if (json[start] == '"') {
+    quoted = true;
+    start++;
+  }
+
+  int end = start;
+  bool hasDigit = false;
+  while (end < json.length()) {
+    char c = json[end];
+
+    bool numeric = (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E';
+    if (!numeric) {
+      break;
+    }
+
+    if (c >= '0' && c <= '9') {
+      hasDigit = true;
+    }
+
+    end++;
+  }
+
+  if (!hasDigit) {
+    return false;
+  }
+
+  if (quoted) {
+    if (end >= json.length() || json[end] != '"') {
+      return false;
+    }
+  }
+
+  String token = json.substring(start, end);
+  *outValue = token.toFloat();
+  return true;
+}
+
+bool firebasePullFanSettings() {
+  String path = "/fan/settings.json";
+  path += firebaseAuthQuery();
+
+  String response;
+  if (!espHttpJsonRequest("GET", path, "", &response)) {
+    Serial.println(F("[FAN WARN] fan/settings fetch failed."));
+    return false;
+  }
+
+  int bodyPos = response.indexOf("\r\n\r\n");
+  if (bodyPos < 0) {
+    Serial.println(F("[FAN WARN] fan/settings response has no body."));
+    return false;
+  }
+
+  String body = response.substring(bodyPos + 4);
+  body.trim();
+
+  if (body.length() == 0 || body == "null") {
+    Serial.println(F("[FAN] fan/settings not found, keeping defaults."));
+    applyFanControlLogic();
+    return true;
+  }
+
+  bool parsedAny = false;
+  bool nextManualOn = fanManualOn;
+  float nextManualPercent = fanManualPercent;
+  bool nextAutoEnabled = fanAutoEnabled;
+  float nextAutoThresholdC = fanAutoThresholdC;
+
+  bool boolValue;
+  float floatValue;
+
+  if (jsonReadBool(body, "manualOn", &boolValue)) {
+    nextManualOn = boolValue;
+    parsedAny = true;
+  }
+  if (jsonReadFloat(body, "manualPercent", &floatValue)) {
+    nextManualPercent = floatValue;
+    parsedAny = true;
+  }
+  if (jsonReadBool(body, "autoEnabled", &boolValue)) {
+    nextAutoEnabled = boolValue;
+    parsedAny = true;
+  }
+  if (jsonReadFloat(body, "autoThresholdC", &floatValue)) {
+    nextAutoThresholdC = floatValue;
+    parsedAny = true;
+  }
+
+  if (!parsedAny) {
+    Serial.println(F("[FAN WARN] fan/settings has no recognized fields."));
+    return false;
+  }
+
+  fanManualOn = nextManualOn;
+  fanManualPercent = constrain((int)(nextManualPercent + 0.5f), 0, 100);
+  fanAutoEnabled = nextAutoEnabled;
+  fanAutoThresholdC = constrain(nextAutoThresholdC, 15.0, 45.0);
+
+  Serial.print(F("[FAN] Settings synced | manualOn="));
+  Serial.print(fanManualOn ? F("true") : F("false"));
+  Serial.print(F(", manualPercent="));
+  Serial.print(fanManualPercent);
+  Serial.print(F(", autoEnabled="));
+  Serial.print(fanAutoEnabled ? F("true") : F("false"));
+  Serial.print(F(", autoThresholdC="));
+  Serial.println(fanAutoThresholdC, 1);
+
+  applyFanControlLogic();
+  return true;
 }
 
 void firebasePushSensorLatest() {
@@ -478,6 +694,24 @@ void firebasePushSensorLatest() {
   payload += ",";
   payload += "\"hasFood\":";
   payload += (hasFoodInContainer ? "true" : "false");
+  payload += ",";
+  payload += "\"fanSpeed\":";
+  payload += String(fanSpeed);
+  payload += ",";
+  payload += "\"fanManualOn\":";
+  payload += (fanManualOn ? "true" : "false");
+  payload += ",";
+  payload += "\"fanManualPercent\":";
+  payload += String(fanManualPercent);
+  payload += ",";
+  payload += "\"fanAutoEnabled\":";
+  payload += (fanAutoEnabled ? "true" : "false");
+  payload += ",";
+  payload += "\"fanAutoThresholdC\":";
+  payload += String(fanAutoThresholdC, 1);
+  payload += ",";
+  payload += "\"fanAutoTriggered\":";
+  payload += (fanAutoTriggered ? "true" : "false");
   payload += ",";
   payload += "\"timestamp\":{\".sv\":\"timestamp\"}";
   payload += "}";
@@ -733,11 +967,14 @@ void readDHT() {
   if (isnan(t) || isnan(h)) {
     dhtOK = false;
     Serial.println(F("[DHT] Read failed — check wiring!"));
+    applyFanControlLogic();
     return;
   }
   dhtOK       = true;
   dhtTemp     = t;
   dhtHumidity = h;
+
+  applyFanControlLogic();
 
   Serial.print(F("[DHT] Temp: "));     Serial.print(t, 1);
   Serial.print(F(" C  |  Humidity: ")); Serial.print(h, 0);
@@ -834,11 +1071,12 @@ void setup() {
   Serial.println(F("RFID + HC-SR04 + DHT11 + HX711 + OLED + ESP + FAN"));
   Serial.println(F("           CYBERPUNK HUD  v1.4              "));
   Serial.println(F("============================================"));
-  Serial.println(F("[FAN] Type 0-100 and Enter to set fan speed."));
+  Serial.println(F("[FAN] Type 0-100 and Enter to set manual fan speed."));
 
   // ── Fan ───────────────────────────────────────────────
   pinMode(FAN_PIN, OUTPUT);
   analogWrite(FAN_PIN, 0);  // Start off
+  applyFanControlLogic();
   Serial.println(F("[FAN] N-MOSFET fan ready on pin 6."));
 
   // ── RFID ──────────────────────────────────────────────
@@ -913,8 +1151,11 @@ void setup() {
   initESP8266();
   if (wifiConnected) configureESP8266SSL();
 
-  // First sensor sync right after WiFi comes up
+  // Pull fan settings + first sensor sync right after WiFi comes up
   if (wifiConnected) {
+    firebasePullFanSettings();
+    lastFanControlPull = millis();
+
     firebasePushSensorLatest();
     lastFirebasePush = millis();
   }
@@ -966,6 +1207,12 @@ void loop() {
   if (now - lastWeightTime >= WEIGHT_INTERVAL) {
     lastWeightTime = now;
     readFoodWeight();
+  }
+
+  // ── Pull fan settings from Firebase ─────────────────────
+  if (wifiConnected && (now - lastFanControlPull >= FIREBASE_FAN_CONTROL_INTERVAL)) {
+    lastFanControlPull = now;
+    firebasePullFanSettings();
   }
 
   // ── Firebase push (for Web App realtime display) ───────

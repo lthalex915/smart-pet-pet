@@ -6,6 +6,7 @@ import { useRFIDHistory } from '../hooks/useRFIDHistory';
 import { useUserPollInterval } from '../hooks/useUserPollInterval';
 import { useRFIDBinding } from '../hooks/useRFIDBinding';
 import { useBoardConnection } from '../hooks/useBoardConnection';
+import { useFanSettings } from '../hooks/useFanSettings';
 import SensorCard from '../components/SensorCard';
 import TempHumidityChart from '../components/TempHumidityChart';
 import RFIDLog from '../components/RFIDLog';
@@ -64,6 +65,12 @@ export default function Dashboard({ user }: Props) {
   const [rfidSaving, setRfidSaving] = useState(false);
   const [rfidMsg, setRfidMsg] = useState('');
 
+  const [fanMsg, setFanMsg] = useState('');
+  const [fanManualOnInput, setFanManualOnInput] = useState(false);
+  const [fanManualPercentInput, setFanManualPercentInput] = useState(100);
+  const [fanAutoEnabledInput, setFanAutoEnabledInput] = useState(true);
+  const [fanAutoThresholdInput, setFanAutoThresholdInput] = useState(27);
+
   const {
     connection: boardConnection,
     loading: boardLoading,
@@ -93,6 +100,13 @@ export default function Dashboard({ user }: Props) {
     upsertBinding,
     disconnectBinding,
   } = useRFIDBinding(user.uid);
+  const {
+    settings: fanSettings,
+    loading: fanLoading,
+    saving: fanSaving,
+    error: fanError,
+    saveSettings: saveFanSettings,
+  } = useFanSettings(user.uid, pollIntervalMs);
 
   const latestScan = scans[0] ?? null;
 
@@ -112,6 +126,13 @@ export default function Dashboard({ user }: Props) {
 
     setBoardIdInput(boardConnection.boardId);
   }, [boardConnection]);
+
+  useEffect(() => {
+    setFanManualOnInput(fanSettings.manualOn);
+    setFanManualPercentInput(fanSettings.manualPercent);
+    setFanAutoEnabledInput(fanSettings.autoEnabled);
+    setFanAutoThresholdInput(fanSettings.autoThresholdC);
+  }, [fanSettings]);
 
   // Check if user already has Google linked
   const hasGoogleLinked = user.providerData.some(p => p.providerId === 'google.com');
@@ -237,6 +258,42 @@ export default function Dashboard({ user }: Props) {
   const handlePollIntervalChange = (event: ChangeEvent<HTMLSelectElement>) => {
     setPollIntervalMs(Number(event.target.value));
   };
+
+  const handleSaveFanSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFanMsg('');
+
+    try {
+      await saveFanSettings({
+        manualOn: fanManualOnInput,
+        manualPercent: fanManualPercentInput,
+        autoEnabled: fanAutoEnabledInput,
+        autoThresholdC: fanAutoThresholdInput,
+      });
+      setFanMsg('✓ 風扇設定已儲存');
+    } catch (err: unknown) {
+      setFanMsg(err instanceof Error ? err.message : '風扇設定儲存失敗');
+    }
+  };
+
+  const fanSpeedDisplay =
+    typeof data?.fanSpeed === 'number'
+      ? Math.round(data.fanSpeed)
+      : fanSettings.manualOn
+        ? fanSettings.manualPercent
+        : 0;
+
+  const fanAutoEnabledCurrent =
+    typeof data?.fanAutoEnabled === 'boolean'
+      ? data.fanAutoEnabled
+      : fanSettings.autoEnabled;
+
+  const fanAutoTriggeredCurrent = Boolean(data?.fanAutoTriggered);
+
+  const fanThresholdCurrent =
+    typeof data?.fanAutoThresholdC === 'number'
+      ? data.fanAutoThresholdC
+      : fanSettings.autoThresholdC;
 
   const latestTapStatus = useMemo(() => {
     if (!latestScan) {
@@ -372,7 +429,7 @@ export default function Dashboard({ user }: Props) {
                   </div>
                 )}
 
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+                <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
                   <SensorCard
                     label="溫度"
                     value={data?.temperature != null
@@ -408,11 +465,29 @@ export default function Dashboard({ user }: Props) {
                     loading={loading}
                     warn={!loading && !!data && !data.hasFood}
                   />
+                  <SensorCard
+                    label="風扇速度"
+                    value={String(fanSpeedDisplay)}
+                    unit="%"
+                    loading={loading && fanLoading}
+                  />
                 </div>
 
                 {!loading && data && !data.hasFood && (
                   <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-red-50 border-red-100 text-red-700">
                     偵測到飼料不足，請補充飼料。
+                  </div>
+                )}
+
+                {!loading && (
+                  <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-blue-50 border-blue-100 text-blue-700">
+                    風扇狀態：{fanSpeedDisplay}%
+                    {' · '}
+                    {fanAutoTriggeredCurrent
+                      ? `已觸發自動降溫（門檻 ${fanThresholdCurrent.toFixed(1)}°C）`
+                      : fanAutoEnabledCurrent
+                        ? `自動模式待命（門檻 ${fanThresholdCurrent.toFixed(1)}°C）`
+                        : '自動模式關閉'}
                   </div>
                 )}
 
@@ -469,7 +544,7 @@ export default function Dashboard({ user }: Props) {
               <div className="space-y-4 max-w-lg">
                 <div className="mb-2">
                   <h2 className="text-xl font-bold text-gray-900">設定</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">帳戶、Board 連線、同步頻率與 RFID 綁定</p>
+                  <p className="text-sm text-gray-400 mt-0.5">帳戶、Board、風扇控制、同步頻率與 RFID 綁定</p>
                 </div>
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
@@ -575,6 +650,114 @@ export default function Dashboard({ user }: Props) {
                       目前每 {formatPollIntervalLabel(pollIntervalMs)}
                     </span>
                   </div>
+                </div>
+
+                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">風扇控制設定</p>
+
+                  <p className="text-xs text-gray-500">
+                    即時狀態：
+                    {fanLoading
+                      ? ' 讀取中…'
+                      : ` 速度 ${fanSpeedDisplay}% · ${fanAutoTriggeredCurrent ? '自動觸發中' : fanAutoEnabledCurrent ? '自動模式待命' : '自動模式關閉'}`}
+                  </p>
+
+                  <form className="space-y-3" onSubmit={handleSaveFanSettings}>
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={fanManualOnInput}
+                        onChange={(event) => setFanManualOnInput(event.target.checked)}
+                        disabled={fanSaving}
+                      />
+                      手動開啟風扇
+                    </label>
+
+                    <div>
+                      <label htmlFor="fan-manual-percent" className="text-gray-500 text-xs mb-1 block">
+                        手動風速（%）
+                      </label>
+                      <input
+                        id="fan-manual-percent"
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={fanManualPercentInput}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          setFanManualPercentInput(
+                            Number.isFinite(next)
+                              ? Math.max(0, Math.min(100, Math.round(next)))
+                              : 0,
+                          );
+                        }}
+                        disabled={fanSaving || !fanManualOnInput}
+                        className="w-full"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">目前設定：{fanManualPercentInput}%</p>
+                    </div>
+
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={fanAutoEnabledInput}
+                        onChange={(event) => setFanAutoEnabledInput(event.target.checked)}
+                        disabled={fanSaving}
+                      />
+                      啟用溫度自動開風扇
+                    </label>
+
+                    <div>
+                      <label htmlFor="fan-auto-threshold" className="text-gray-500 text-xs mb-1 block">
+                        自動啟動溫度（°C）
+                      </label>
+                      <input
+                        id="fan-auto-threshold"
+                        type="number"
+                        min={15}
+                        max={45}
+                        step={0.5}
+                        value={fanAutoThresholdInput}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          setFanAutoThresholdInput(
+                            Number.isFinite(next)
+                              ? Math.max(15, Math.min(45, Number(next.toFixed(1))))
+                              : 27,
+                          );
+                        }}
+                        disabled={fanSaving || !fanAutoEnabledInput}
+                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">
+                        當 DHT11 偵測溫度 ≥ 此值時，自動開啟風扇。預設 27°C。
+                      </p>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={fanSaving || fanLoading}
+                      className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                      style={{ backgroundColor: BLUE }}
+                    >
+                      {fanSaving ? '儲存中…' : '儲存風扇設定'}
+                    </button>
+                  </form>
+
+                  {(fanMsg || fanError) && (
+                    <p
+                      className="text-sm"
+                      style={{
+                        color:
+                          (fanMsg && fanMsg.startsWith('✓'))
+                            ? '#16a34a'
+                            : '#dc2626',
+                      }}
+                    >
+                      {fanMsg || fanError}
+                    </p>
+                  )}
                 </div>
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">

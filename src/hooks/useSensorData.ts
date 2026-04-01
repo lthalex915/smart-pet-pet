@@ -40,6 +40,12 @@ function normalizeSensorData(value: SensorData | null): SensorData | null {
     humidity: typeof value.humidity === 'number' ? value.humidity : null,
     weight: typeof value.weight === 'number' ? value.weight : null,
     hasFood: Boolean(value.hasFood),
+    fanSpeed: typeof value.fanSpeed === 'number' ? value.fanSpeed : undefined,
+    fanManualOn: typeof value.fanManualOn === 'boolean' ? value.fanManualOn : undefined,
+    fanManualPercent: typeof value.fanManualPercent === 'number' ? value.fanManualPercent : undefined,
+    fanAutoEnabled: typeof value.fanAutoEnabled === 'boolean' ? value.fanAutoEnabled : undefined,
+    fanAutoThresholdC: typeof value.fanAutoThresholdC === 'number' ? value.fanAutoThresholdC : undefined,
+    fanAutoTriggered: typeof value.fanAutoTriggered === 'boolean' ? value.fanAutoTriggered : undefined,
     timestamp: Number(value.timestamp ?? 0),
   };
 }

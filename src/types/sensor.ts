@@ -6,7 +6,20 @@ export interface SensorData {
   humidity: number | null;
   weight: number | null;
   hasFood: boolean;
+  fanSpeed?: number;
+  fanManualOn?: boolean;
+  fanManualPercent?: number;
+  fanAutoEnabled?: boolean;
+  fanAutoThresholdC?: number;
+  fanAutoTriggered?: boolean;
   timestamp: number;
+}
+
+export interface FanSettings {
+  manualOn: boolean;
+  manualPercent: number;
+  autoEnabled: boolean;
+  autoThresholdC: number;
 }
 
 export interface SensorTrendPoint {
