@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { get, ref, set } from 'firebase/database';
 import { db } from '../firebase';
 import { DEFAULT_POLL_INTERVAL_MS } from '../constants/pollInterval';
-import { legacyFanSettingsPath, userFanSettingsPath } from '../constants/dbPaths';
+import {
+  legacyFanSettingsDeprecatedPath,
+  legacyFanSettingsPath,
+  userFanSettingsPath,
+} from '../constants/dbPaths';
 import type { FanSettings } from '../types/sensor';
 
 export const DEFAULT_FAN_SETTINGS: FanSettings = {
@@ -71,6 +75,11 @@ export function useFanSettings(
     [],
   );
 
+  const legacyDeprecatedSettingsRef = useMemo(
+    () => ref(db, legacyFanSettingsDeprecatedPath()),
+    [],
+  );
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -84,9 +93,10 @@ export function useFanSettings(
     }
 
     try {
-      const [userSnapshot, legacySnapshot] = await Promise.all([
+      const [userSnapshot, legacySnapshot, legacyDeprecatedSnapshot] = await Promise.all([
         userSettingsRef ? getSafe(get(userSettingsRef)) : Promise.resolve(null),
         getSafe(get(legacySettingsRef)),
+        getSafe(get(legacyDeprecatedSettingsRef)),
       ]);
 
       const selectedValue =
@@ -94,7 +104,9 @@ export function useFanSettings(
           ? (userSnapshot.val() as Partial<FanSettings>)
           : legacySnapshot?.exists()
             ? (legacySnapshot.val() as Partial<FanSettings>)
-            : null;
+            : legacyDeprecatedSnapshot?.exists()
+              ? (legacyDeprecatedSnapshot.val() as Partial<FanSettings>)
+              : null;
 
       if (!isMountedRef.current) {
         return;
@@ -113,7 +125,7 @@ export function useFanSettings(
         setLoading(false);
       }
     }
-  }, [legacySettingsRef, userSettingsRef]);
+  }, [legacyDeprecatedSettingsRef, legacySettingsRef, userSettingsRef]);
 
   useEffect(() => {
     void refresh();
@@ -142,15 +154,35 @@ export function useFanSettings(
           updatedAt: Date.now(),
         };
 
-        const writes: Array<Promise<void>> = [
-          set(legacySettingsRef, payload),
-        ];
+        let wroteAny = false;
+        let firstError: unknown = null;
 
         if (userSettingsRef) {
-          writes.push(set(userSettingsRef, payload));
+          try {
+            await set(userSettingsRef, payload);
+            wroteAny = true;
+          } catch (err: unknown) {
+            firstError = firstError ?? err;
+          }
         }
 
-        await Promise.all(writes);
+        try {
+          await set(legacySettingsRef, payload);
+          wroteAny = true;
+        } catch (err: unknown) {
+          firstError = firstError ?? err;
+        }
+
+        // Best-effort backward compatibility path. Ignore failures.
+        try {
+          await set(legacyDeprecatedSettingsRef, payload);
+        } catch {
+          // no-op
+        }
+
+        if (!wroteAny) {
+          throw (firstError instanceof Error ? firstError : new Error('儲存風扇設定失敗'));
+        }
 
         if (!isMountedRef.current) {
           return;
@@ -169,7 +201,7 @@ export function useFanSettings(
         }
       }
     },
-    [legacySettingsRef, settings, userSettingsRef],
+    [legacyDeprecatedSettingsRef, legacySettingsRef, settings, userSettingsRef],
   );
 
   return {

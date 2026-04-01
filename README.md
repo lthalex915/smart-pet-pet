@@ -94,12 +94,15 @@ npm run dev
 - `users/{uid}/sensors/latest`
 - `users/{uid}/sensors/history`
 - `users/{uid}/rfidScans`
+- `users/{uid}/fan/settings`
 
 另外也支援舊版（legacy）全域路徑作為 fallback：
 
 - `sensors/latest`
 - `sensors/history`
 - `rfidScans`
+- `sensors/fanSettings`（風扇控制共享路徑）
+- `fan/settings`（舊版相容，建議保留唯讀）
 
 > 建議正式環境改為僅允許使用者讀寫自己的 `users/{uid}` 區域。
 
@@ -123,6 +126,12 @@ npm run dev
     "rfidScans": {
       ".read": true,
       ".write": true
+    },
+    "fan": {
+      "settings": {
+        ".read": true,
+        ".write": false
+      }
     }
   }
 }

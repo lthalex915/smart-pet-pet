@@ -27,6 +27,12 @@ export function userFanSettingsPath(uid: string): string {
   return `users/${uid}/fan/settings`;
 }
 
+// Shared path for firmware/frontend interop (typically allowed under legacy sensors rules).
 export function legacyFanSettingsPath(): string {
+  return 'sensors/fanSettings';
+}
+
+// Backward compatibility with older firmware/frontend versions.
+export function legacyFanSettingsDeprecatedPath(): string {
   return 'fan/settings';
 }

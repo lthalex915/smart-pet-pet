@@ -597,77 +597,104 @@ bool jsonReadFloat(const String& json, const char* key, float* outValue) {
 }
 
 bool firebasePullFanSettings() {
-  String path = "/fan/settings.json";
-  path += firebaseAuthQuery();
+  const char* settingsPaths[] = {
+    "/sensors/fanSettings.json",  // preferred shared path
+    "/fan/settings.json",         // deprecated fallback path
+  };
 
   String response;
-  if (!espHttpJsonRequest("GET", path, "", &response)) {
-    Serial.println(F("[FAN WARN] fan/settings fetch failed."));
-    return false;
-  }
+  String activePath = "";
 
-  int bodyPos = response.indexOf("\r\n\r\n");
-  if (bodyPos < 0) {
-    Serial.println(F("[FAN WARN] fan/settings response has no body."));
-    return false;
-  }
+  for (int i = 0; i < 2; i++) {
+    String path = String(settingsPaths[i]);
+    path += firebaseAuthQuery();
 
-  String body = response.substring(bodyPos + 4);
-  body.trim();
+    if (!espHttpJsonRequest("GET", path, "", &response)) {
+      if (i == 0) {
+        Serial.println(F("[FAN WARN] sensors/fanSettings fetch failed, trying legacy path."));
+      } else {
+        Serial.println(F("[FAN WARN] fan/settings fetch failed."));
+      }
+      continue;
+    }
 
-  if (body.length() == 0 || body == "null") {
-    Serial.println(F("[FAN] fan/settings not found, keeping defaults."));
+    int bodyPos = response.indexOf("\r\n\r\n");
+    if (bodyPos < 0) {
+      if (i == 0) {
+        Serial.println(F("[FAN WARN] sensors/fanSettings response has no body, trying legacy path."));
+      } else {
+        Serial.println(F("[FAN WARN] fan/settings response has no body."));
+      }
+      continue;
+    }
+
+    String body = response.substring(bodyPos + 4);
+    body.trim();
+
+    if (body.length() == 0 || body == "null") {
+      if (i == 0) {
+        Serial.println(F("[FAN] sensors/fanSettings not found, trying legacy path."));
+      } else {
+        Serial.println(F("[FAN] fan/settings not found, keeping previous settings."));
+      }
+      continue;
+    }
+
+    activePath = settingsPaths[i];
+
+    bool parsedAny = false;
+    bool nextManualOn = fanManualOn;
+    float nextManualPercent = fanManualPercent;
+    bool nextAutoEnabled = fanAutoEnabled;
+    float nextAutoThresholdC = fanAutoThresholdC;
+
+    bool boolValue;
+    float floatValue;
+
+    if (jsonReadBool(body, "manualOn", &boolValue)) {
+      nextManualOn = boolValue;
+      parsedAny = true;
+    }
+    if (jsonReadFloat(body, "manualPercent", &floatValue)) {
+      nextManualPercent = floatValue;
+      parsedAny = true;
+    }
+    if (jsonReadBool(body, "autoEnabled", &boolValue)) {
+      nextAutoEnabled = boolValue;
+      parsedAny = true;
+    }
+    if (jsonReadFloat(body, "autoThresholdC", &floatValue)) {
+      nextAutoThresholdC = floatValue;
+      parsedAny = true;
+    }
+
+    if (!parsedAny) {
+      Serial.println(F("[FAN WARN] fan settings JSON has no recognized fields."));
+      continue;
+    }
+
+    fanManualOn = nextManualOn;
+    fanManualPercent = constrain((int)(nextManualPercent + 0.5f), 0, 100);
+    fanAutoEnabled = nextAutoEnabled;
+    fanAutoThresholdC = constrain(nextAutoThresholdC, 15.0, 45.0);
+
+    Serial.print(F("[FAN] Settings synced from "));
+    Serial.print(activePath);
+    Serial.print(F(" | manualOn="));
+    Serial.print(fanManualOn ? F("true") : F("false"));
+    Serial.print(F(", manualPercent="));
+    Serial.print(fanManualPercent);
+    Serial.print(F(", autoEnabled="));
+    Serial.print(fanAutoEnabled ? F("true") : F("false"));
+    Serial.print(F(", autoThresholdC="));
+    Serial.println(fanAutoThresholdC, 1);
+
     applyFanControlLogic();
     return true;
   }
 
-  bool parsedAny = false;
-  bool nextManualOn = fanManualOn;
-  float nextManualPercent = fanManualPercent;
-  bool nextAutoEnabled = fanAutoEnabled;
-  float nextAutoThresholdC = fanAutoThresholdC;
-
-  bool boolValue;
-  float floatValue;
-
-  if (jsonReadBool(body, "manualOn", &boolValue)) {
-    nextManualOn = boolValue;
-    parsedAny = true;
-  }
-  if (jsonReadFloat(body, "manualPercent", &floatValue)) {
-    nextManualPercent = floatValue;
-    parsedAny = true;
-  }
-  if (jsonReadBool(body, "autoEnabled", &boolValue)) {
-    nextAutoEnabled = boolValue;
-    parsedAny = true;
-  }
-  if (jsonReadFloat(body, "autoThresholdC", &floatValue)) {
-    nextAutoThresholdC = floatValue;
-    parsedAny = true;
-  }
-
-  if (!parsedAny) {
-    Serial.println(F("[FAN WARN] fan/settings has no recognized fields."));
-    return false;
-  }
-
-  fanManualOn = nextManualOn;
-  fanManualPercent = constrain((int)(nextManualPercent + 0.5f), 0, 100);
-  fanAutoEnabled = nextAutoEnabled;
-  fanAutoThresholdC = constrain(nextAutoThresholdC, 15.0, 45.0);
-
-  Serial.print(F("[FAN] Settings synced | manualOn="));
-  Serial.print(fanManualOn ? F("true") : F("false"));
-  Serial.print(F(", manualPercent="));
-  Serial.print(fanManualPercent);
-  Serial.print(F(", autoEnabled="));
-  Serial.print(fanAutoEnabled ? F("true") : F("false"));
-  Serial.print(F(", autoThresholdC="));
-  Serial.println(fanAutoThresholdC, 1);
-
   applyFanControlLogic();
-  return true;
+  return false;
 }
 
 void firebasePushSensorLatest() {
