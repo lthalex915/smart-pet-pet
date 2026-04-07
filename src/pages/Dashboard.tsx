@@ -70,6 +70,7 @@ export default function Dashboard({ user }: Props) {
   const [fanManualPercentInput, setFanManualPercentInput] = useState(100);
   const [fanAutoEnabledInput, setFanAutoEnabledInput] = useState(true);
   const [fanAutoThresholdInput, setFanAutoThresholdInput] = useState(27);
+  const [fanFormDirty, setFanFormDirty] = useState(false);
 
   const {
     connection: boardConnection,
@@ -128,11 +129,15 @@ export default function Dashboard({ user }: Props) {
   }, [boardConnection]);
 
   useEffect(() => {
+    if (fanFormDirty) {
+      return;
+    }
+
     setFanManualOnInput(fanSettings.manualOn);
     setFanManualPercentInput(fanSettings.manualPercent);
     setFanAutoEnabledInput(fanSettings.autoEnabled);
     setFanAutoThresholdInput(fanSettings.autoThresholdC);
-  }, [fanSettings]);
+  }, [fanFormDirty, fanSettings]);
 
   // Check if user already has Google linked
   const hasGoogleLinked = user.providerData.some(p => p.providerId === 'google.com');
@@ -270,6 +275,7 @@ export default function Dashboard({ user }: Props) {
         autoEnabled: fanAutoEnabledInput,
         autoThresholdC: fanAutoThresholdInput,
       });
+      setFanFormDirty(false);
       setFanMsg('✓ 風扇設定已儲存');
     } catch (err: unknown) {
       setFanMsg(err instanceof Error ? err.message : '風扇設定儲存失敗');
@@ -667,7 +673,10 @@ export default function Dashboard({ user }: Props) {
                       <input
                         type="checkbox"
                         checked={fanManualOnInput}
-                        onChange={(event) => setFanManualOnInput(event.target.checked)}
+                        onChange={(event) => {
+                          setFanManualOnInput(event.target.checked);
+                          setFanFormDirty(true);
+                        }}
                         disabled={fanSaving}
                       />
                       手動開啟風扇
@@ -691,6 +700,7 @@ export default function Dashboard({ user }: Props) {
                               ? Math.max(0, Math.min(100, Math.round(next)))
                               : 0,
                           );
+                          setFanFormDirty(true);
                         }}
                         disabled={fanSaving || !fanManualOnInput}
                         className="w-full"
@@ -702,7 +712,10 @@ export default function Dashboard({ user }: Props) {
                       <input
                         type="checkbox"
                         checked={fanAutoEnabledInput}
-                        onChange={(event) => setFanAutoEnabledInput(event.target.checked)}
+                        onChange={(event) => {
+                          setFanAutoEnabledInput(event.target.checked);
+                          setFanFormDirty(true);
+                        }}
                         disabled={fanSaving}
                       />
                       啟用溫度自動開風扇
@@ -726,6 +739,7 @@ export default function Dashboard({ user }: Props) {
                               ? Math.max(15, Math.min(45, Number(next.toFixed(1))))
                               : 27,
                           );
+                          setFanFormDirty(true);
                         }}
                         disabled={fanSaving || !fanAutoEnabledInput}
                         className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
