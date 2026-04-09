@@ -80,6 +80,8 @@
 #include <Adafruit_SSD1306.h>
 #include <DHT.h>
 #include <HX711.h>
+#include <EEPROM.h>
+#include <limits.h>
 
 // ── Wi-Fi Credentials ──────────────────────────────────────
 #define WIFI_SSID  "EE3070_P1615_1"
@@ -163,6 +165,48 @@ bool  dhtOK       = false;
 bool wifiConnected       = false;
 bool firebaseUseIPFallback = false;
 
+// ── Offline EEPROM Queue State ────────────────────────────
+struct __attribute__((packed)) OfflineQueueMeta {
+  uint16_t magic;
+  uint8_t  version;
+  uint8_t  reserved;
+  uint16_t head;
+  uint16_t count;
+  uint32_t dropped;
+};
+
+struct __attribute__((packed)) OfflineSample {
+  uint8_t  marker;
+  uint32_t capturedAtMs;
+  int16_t  distanceDeciCm;
+  int16_t  tempDeciC;
+  int16_t  humidityDeciPct;
+  int32_t  weightDeciG;
+  int16_t  fanAutoThresholdDeciC;
+  uint8_t  flags;
+  uint8_t  fanSpeedPct;
+  uint8_t  fanManualPct;
+};
+
+const uint16_t EEPROM_QUEUE_MAGIC   = 0xA55A;
+const uint8_t  EEPROM_QUEUE_VERSION = 1;
+const uint8_t  OFFLINE_SAMPLE_MARKER = 0xA5;
+
+const uint8_t OFFLINE_FLAG_NO_ECHO           = 0x01;
+const uint8_t OFFLINE_FLAG_DHT_VALID         = 0x02;
+const uint8_t OFFLINE_FLAG_WEIGHT_VALID      = 0x04;
+const uint8_t OFFLINE_FLAG_HAS_FOOD          = 0x08;
+const uint8_t OFFLINE_FLAG_FAN_MANUAL_ON     = 0x10;
+const uint8_t OFFLINE_FLAG_FAN_AUTO_ENABLED  = 0x20;
+const uint8_t OFFLINE_FLAG_FAN_AUTO_TRIGGERED = 0x40;
+
+const int EEPROM_QUEUE_META_ADDR = 0;
+const int EEPROM_QUEUE_DATA_ADDR = EEPROM_QUEUE_META_ADDR + (int)sizeof(OfflineQueueMeta);
+
+OfflineQueueMeta offlineMeta = {};
+bool             offlineQueueEnabled = false;
+uint16_t         offlineQueueCapacity = 0;
+
 // ── OLED State ─────────────────────────────────────────────
 bool          oledOK         = false;
 byte          displayMode    = MODE_HUD;
@@ -177,7 +221,11 @@ unsigned long lastDHTTime      = 0;
 unsigned long lastWeightTime   = 0;
 unsigned long lastFirebasePush = 0;
 unsigned long lastFanControlPull = 0;
+unsigned long lastOfflineStoreTime = 0;
+unsigned long lastOfflineFlushTime = 0;
+unsigned long lastReconnectAttempt = 0;
 bool          blinkState       = true;
+bool          previousWifiConnected = false;
 
 const unsigned long DISTANCE_INTERVAL             = 300;
 const unsigned long OLED_INTERVAL                 = 150;
@@ -186,6 +234,371 @@ const unsigned long DHT_INTERVAL                  = 3000;
 const unsigned long WEIGHT_INTERVAL               = 1500;
 const unsigned long FIREBASE_SENSOR_INTERVAL      = 3000;
 const unsigned long FIREBASE_FAN_CONTROL_INTERVAL = 2500;
+const unsigned long OFFLINE_STORE_INTERVAL         = 300000;
+const unsigned long OFFLINE_FLUSH_INTERVAL         = 2000;
+const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
+
+// Forward declarations used before concrete definitions.
+void configureESP8266SSL();
+bool firebasePullFanSettings();
+void firebasePushSensorLatest();
+String firebaseAuthQuery();
+bool espHttpJsonRequest(const char* method, const String& path, const String& payload,
+                        String* responseOut = NULL);
+
+
+// ═══════════════════════════════════════════════════════════
+//  EEPROM OFFLINE QUEUE HELPERS
+// ═══════════════════════════════════════════════════════════
+
+bool isFiniteFloat(float value) {
+  return !isnan(value) && !isinf(value);
+}
+
+int16_t floatToDeciInt16(float value) {
+  if (!isFiniteFloat(value)) {
+    return 0;
+  }
+
+  float scaled = value * 10.0f;
+  long rounded = (scaled >= 0.0f) ? (long)(scaled + 0.5f) : (long)(scaled - 0.5f);
+
+  if (rounded > 32767L) rounded = 32767L;
+  if (rounded < -32768L) rounded = -32768L;
+  return (int16_t)rounded;
+}
+
+int32_t floatToDeciInt32(float value) {
+  if (!isFiniteFloat(value)) {
+    return 0;
+  }
+
+  float scaled = value * 10.0f;
+  float roundedF = (scaled >= 0.0f) ? (scaled + 0.5f) : (scaled - 0.5f);
+  if (roundedF > (float)LONG_MAX) roundedF = (float)LONG_MAX;
+  if (roundedF < (float)LONG_MIN) roundedF = (float)LONG_MIN;
+  return (int32_t)roundedF;
+}
+
+float deciInt16ToFloat(int16_t value) {
+  return ((float)value) / 10.0f;
+}
+
+float deciInt32ToFloat(int32_t value) {
+  return ((float)value) / 10.0f;
+}
+
+int offlineQueueSlotAddress(uint16_t slot) {
+  return EEPROM_QUEUE_DATA_ADDR + ((int)slot * (int)sizeof(OfflineSample));
+}
+
+void offlineQueuePersistMeta() {
+  EEPROM.put(EEPROM_QUEUE_META_ADDR, offlineMeta);
+}
+
+bool offlineQueueMetaValid(const OfflineQueueMeta& meta) {
+  if (meta.magic != EEPROM_QUEUE_MAGIC) return false;
+  if (meta.version != EEPROM_QUEUE_VERSION) return false;
+  if (offlineQueueCapacity == 0) return false;
+  if (meta.head >= offlineQueueCapacity) return false;
+  if (meta.count > offlineQueueCapacity) return false;
+  return true;
+}
+
+void offlineQueueReset(bool keepDroppedCounter = true) {
+  uint32_t droppedSnapshot = keepDroppedCounter ? offlineMeta.dropped : 0;
+
+  offlineMeta.magic = EEPROM_QUEUE_MAGIC;
+  offlineMeta.version = EEPROM_QUEUE_VERSION;
+  offlineMeta.reserved = 0;
+  offlineMeta.head = 0;
+  offlineMeta.count = 0;
+  offlineMeta.dropped = droppedSnapshot;
+  offlineQueuePersistMeta();
+}
+
+void offlineQueueInit() {
+  int totalBytes = EEPROM.length();
+  int usableBytes = totalBytes - EEPROM_QUEUE_DATA_ADDR;
+
+  if (usableBytes <= 0) {
+    offlineQueueEnabled = false;
+    offlineQueueCapacity = 0;
+    Serial.println(F("[EEPROM WARN] Not enough EEPROM for offline queue."));
+    return;
+  }
+
+  offlineQueueCapacity = (uint16_t)(usableBytes / (int)sizeof(OfflineSample));
+  if (offlineQueueCapacity == 0) {
+    offlineQueueEnabled = false;
+    Serial.println(F("[EEPROM WARN] Offline queue capacity is zero."));
+    return;
+  }
+
+  OfflineQueueMeta storedMeta;
+  EEPROM.get(EEPROM_QUEUE_META_ADDR, storedMeta);
+
+  offlineQueueEnabled = true;
+  if (!offlineQueueMetaValid(storedMeta)) {
+    offlineMeta = {};
+    offlineQueueReset(false);
+    Serial.println(F("[EEPROM] Queue metadata initialized."));
+  } else {
+    offlineMeta = storedMeta;
+    Serial.println(F("[EEPROM] Queue metadata loaded."));
+  }
+
+  Serial.print(F("[EEPROM] Offline queue capacity: "));
+  Serial.print(offlineQueueCapacity);
+  Serial.println(F(" samples."));
+  if (offlineMeta.count > 0) {
+    Serial.print(F("[EEPROM] Pending buffered samples: "));
+    Serial.println(offlineMeta.count);
+  }
+}
+
+bool offlineQueueReadSlot(uint16_t slot, OfflineSample* outSample) {
+  if (!offlineQueueEnabled || !outSample) return false;
+  if (slot >= offlineQueueCapacity) return false;
+
+  EEPROM.get(offlineQueueSlotAddress(slot), *outSample);
+  return true;
+}
+
+void offlineQueueWriteSlot(uint16_t slot, const OfflineSample& sample) {
+  if (!offlineQueueEnabled) return;
+  if (slot >= offlineQueueCapacity) return;
+
+  EEPROM.put(offlineQueueSlotAddress(slot), sample);
+}
+
+bool offlineQueuePush(const OfflineSample& sample) {
+  if (!offlineQueueEnabled || offlineQueueCapacity == 0) {
+    return false;
+  }
+
+  uint16_t writeSlot;
+  bool overwritten = false;
+
+  if (offlineMeta.count < offlineQueueCapacity) {
+    writeSlot = (offlineMeta.head + offlineMeta.count) % offlineQueueCapacity;
+    offlineMeta.count++;
+  } else {
+    writeSlot = offlineMeta.head;
+    offlineMeta.head = (offlineMeta.head + 1) % offlineQueueCapacity;
+    offlineMeta.dropped++;
+    overwritten = true;
+  }
+
+  offlineQueueWriteSlot(writeSlot, sample);
+  offlineQueuePersistMeta();
+
+  Serial.print(F("[EEPROM] Buffered sample. pending="));
+  Serial.print(offlineMeta.count);
+  if (overwritten) {
+    Serial.print(F(" (oldest overwritten, dropped="));
+    Serial.print(offlineMeta.dropped);
+    Serial.print(')');
+  }
+  Serial.println();
+  return true;
+}
+
+bool offlineQueuePopOldest() {
+  if (!offlineQueueEnabled || offlineMeta.count == 0 || offlineQueueCapacity == 0) {
+    return false;
+  }
+
+  offlineMeta.head = (offlineMeta.head + 1) % offlineQueueCapacity;
+  offlineMeta.count--;
+  offlineQueuePersistMeta();
+  return true;
+}
+
+bool offlineQueuePeekOldest(OfflineSample* outSample) {
+  if (!offlineQueueEnabled || offlineMeta.count == 0 || !outSample) {
+    return false;
+  }
+
+  if (!offlineQueueReadSlot(offlineMeta.head, outSample)) {
+    return false;
+  }
+
+  if (outSample->marker != OFFLINE_SAMPLE_MARKER) {
+    Serial.println(F("[EEPROM WARN] Invalid marker in oldest sample. Dropping it."));
+    offlineMeta.dropped++;
+    offlineQueuePopOldest();
+    return false;
+  }
+
+  return true;
+}
+
+OfflineSample buildCurrentOfflineSample(unsigned long now) {
+  OfflineSample sample = {};
+  sample.marker = OFFLINE_SAMPLE_MARKER;
+  sample.capturedAtMs = now;
+
+  if (noEcho || lastDistance < 0 || !isFiniteFloat(lastDistance)) {
+    sample.flags |= OFFLINE_FLAG_NO_ECHO;
+  } else {
+    sample.distanceDeciCm = floatToDeciInt16(lastDistance);
+  }
+
+  if (dhtOK && isFiniteFloat(dhtTemp) && isFiniteFloat(dhtHumidity)) {
+    sample.flags |= OFFLINE_FLAG_DHT_VALID;
+    sample.tempDeciC = floatToDeciInt16(dhtTemp);
+    sample.humidityDeciPct = floatToDeciInt16(dhtHumidity);
+  }
+
+  if (loadCellOK && isFiniteFloat(foodWeightGram)) {
+    sample.flags |= OFFLINE_FLAG_WEIGHT_VALID;
+    sample.weightDeciG = floatToDeciInt32(foodWeightGram);
+  }
+
+  if (hasFoodInContainer) sample.flags |= OFFLINE_FLAG_HAS_FOOD;
+  if (fanManualOn) sample.flags |= OFFLINE_FLAG_FAN_MANUAL_ON;
+  if (fanAutoEnabled) sample.flags |= OFFLINE_FLAG_FAN_AUTO_ENABLED;
+  if (fanAutoTriggered) sample.flags |= OFFLINE_FLAG_FAN_AUTO_TRIGGERED;
+
+  sample.fanSpeedPct = (uint8_t)constrain(fanSpeed, 0, 100);
+  sample.fanManualPct = (uint8_t)constrain(fanManualPercent, 0, 100);
+  sample.fanAutoThresholdDeciC = floatToDeciInt16(fanAutoThresholdC);
+
+  return sample;
+}
+
+String buildOfflineSamplePayload(const OfflineSample& sample) {
+  String payload = "{";
+  payload += "\"deviceId\":\"" DEVICE_ID "\",";
+
+  payload += "\"distance\":";
+  if (sample.flags & OFFLINE_FLAG_NO_ECHO) payload += "null";
+  else payload += String(deciInt16ToFloat(sample.distanceDeciCm), 1);
+  payload += ",";
+
+  payload += "\"noEcho\":";
+  payload += ((sample.flags & OFFLINE_FLAG_NO_ECHO) ? "true" : "false");
+  payload += ",";
+
+  payload += "\"temperature\":";
+  if (sample.flags & OFFLINE_FLAG_DHT_VALID) payload += String(deciInt16ToFloat(sample.tempDeciC), 1);
+  else payload += "null";
+  payload += ",";
+
+  payload += "\"humidity\":";
+  if (sample.flags & OFFLINE_FLAG_DHT_VALID) payload += String(deciInt16ToFloat(sample.humidityDeciPct), 1);
+  else payload += "null";
+  payload += ",";
+
+  payload += "\"weight\":";
+  if (sample.flags & OFFLINE_FLAG_WEIGHT_VALID) payload += String(deciInt32ToFloat(sample.weightDeciG), 1);
+  else payload += "null";
+  payload += ",";
+
+  payload += "\"hasFood\":";
+  payload += ((sample.flags & OFFLINE_FLAG_HAS_FOOD) ? "true" : "false");
+  payload += ",";
+
+  payload += "\"fanSpeed\":";
+  payload += String((int)sample.fanSpeedPct);
+  payload += ",";
+
+  payload += "\"fanManualOn\":";
+  payload += ((sample.flags & OFFLINE_FLAG_FAN_MANUAL_ON) ? "true" : "false");
+  payload += ",";
+
+  payload += "\"fanManualPercent\":";
+  payload += String((int)sample.fanManualPct);
+  payload += ",";
+
+  payload += "\"fanAutoEnabled\":";
+  payload += ((sample.flags & OFFLINE_FLAG_FAN_AUTO_ENABLED) ? "true" : "false");
+  payload += ",";
+
+  payload += "\"fanAutoThresholdC\":";
+  payload += String(deciInt16ToFloat(sample.fanAutoThresholdDeciC), 1);
+  payload += ",";
+
+  payload += "\"fanAutoTriggered\":";
+  payload += ((sample.flags & OFFLINE_FLAG_FAN_AUTO_TRIGGERED) ? "true" : "false");
+  payload += ",";
+
+  payload += "\"offlineBuffered\":true,";
+  payload += "\"capturedAtMs\":";
+  payload += String(sample.capturedAtMs);
+  payload += ",";
+  payload += "\"timestamp\":{\".sv\":\"timestamp\"}";
+  payload += "}";
+  return payload;
+}
+
+bool firebasePushOfflineSample(const OfflineSample& sample) {
+  String payload = buildOfflineSamplePayload(sample);
+  String path = "/sensors/history.json";
+  path += firebaseAuthQuery();
+
+  Serial.println(F("[FB] Uploading buffered sample -> sensors/history"));
+  return espHttpJsonRequest("POST", path, payload);
+}
+
+void storeOfflineSampleIfDue(unsigned long now) {
+  if (!offlineQueueEnabled || wifiConnected) {
+    return;
+  }
+
+  if (now - lastOfflineStoreTime < OFFLINE_STORE_INTERVAL) {
+    return;
+  }
+
+  lastOfflineStoreTime = now;
+  OfflineSample sample = buildCurrentOfflineSample(now);
+  if (!offlineQueuePush(sample)) {
+    Serial.println(F("[EEPROM WARN] Failed to buffer offline sample."));
+  }
+}
+
+void flushOfflineQueueBatch(uint8_t maxSamples) {
+  if (!offlineQueueEnabled || !wifiConnected || offlineMeta.count == 0 || maxSamples == 0) {
+    return;
+  }
+
+  uint8_t sent = 0;
+  uint8_t attempts = 0;
+  const uint8_t maxAttempts = maxSamples + 3;
+
+  while (sent < maxSamples && attempts < maxAttempts && offlineMeta.count > 0 && wifiConnected) {
+    attempts++;
+
+    OfflineSample sample;
+    if (!offlineQueuePeekOldest(&sample)) {
+      continue;
+    }
+
+    if (firebasePushOfflineSample(sample)) {
+      offlineQueuePopOldest();
+      sent++;
+      Serial.print(F("[EEPROM] Buffered sample sent. pending="));
+      Serial.println(offlineMeta.count);
+    } else {
+      Serial.println(F("[EEPROM WARN] Buffered sample upload failed; retry later."));
+      break;
+    }
+  }
+}
+
+void flushOfflineQueueIfDue(unsigned long now) {
+  if (!offlineQueueEnabled || !wifiConnected || offlineMeta.count == 0) {
+    return;
+  }
+
+  if (now - lastOfflineFlushTime < OFFLINE_FLUSH_INTERVAL) {
+    return;
+  }
+
+  lastOfflineFlushTime = now;
+  flushOfflineQueueBatch(2);
+}
 
 
 // ═══════════════════════════════════════════════════════════
@@ -277,6 +690,7 @@ bool espSendCmd(const char* cmd, const char* expected,
 
 void initESP8266() {
   Serial.println(F("[ESP] Initialising ESP8266..."));
+  wifiConnected = false;
   ESP_SERIAL.begin(ESP_BAUD);
   delay(1500);
   while (ESP_SERIAL.available()) ESP_SERIAL.read();
@@ -303,6 +717,34 @@ void initESP8266() {
   espSendCmd("AT+GMR", "OK", 5000);  // Firmware version (for SSL capability check)
   wifiConnected = true;
   Serial.println(F("[ESP PASS] WiFi connected — IP obtained."));
+}
+
+void attemptWiFiReconnect(unsigned long now) {
+  if (wifiConnected) {
+    return;
+  }
+
+  if (now - lastReconnectAttempt < WIFI_RECONNECT_INTERVAL) {
+    return;
+  }
+
+  lastReconnectAttempt = now;
+  Serial.println(F("[ESP] WiFi offline. Attempting reconnect..."));
+
+  initESP8266();
+  if (!wifiConnected) {
+    Serial.println(F("[ESP WARN] Reconnect failed."));
+    return;
+  }
+
+  configureESP8266SSL();
+  firebasePullFanSettings();
+  lastFanControlPull = now;
+  firebasePushSensorLatest();
+  lastFirebasePush = now;
+  lastOfflineFlushTime = 0;
+
+  Serial.println(F("[ESP PASS] Reconnect complete."));
 }
 
 void configureESP8266SSL() {
@@ -437,6 +879,7 @@ bool espHttpJsonRequest(const char* method, const String& path, const String& pa
     Serial.println(F("[FB FAIL] SSL socket open failed (CIPSTART)."));
     Serial.print(F("[FB FAIL] CIPSTART response: "));
     Serial.println(openResp);
+    wifiConnected = false;
     return false;
   }
 
@@ -461,6 +904,7 @@ bool espHttpJsonRequest(const char* method, const String& path, const String& pa
   if (!espSendCmd(sendCmd, ">", 5000)) {
     Serial.println(F("[FB FAIL] CIPSEND prompt timeout."));
     ESP_SERIAL.println(F("AT+CIPCLOSE"));
+    wifiConnected = false;
     return false;
   }
 
@@ -472,6 +916,7 @@ bool espHttpJsonRequest(const char* method, const String& path, const String& pa
     Serial.print(F("[FB FAIL] SEND failed. Resp: "));
     Serial.println(resp);
     ESP_SERIAL.println(F("AT+CIPCLOSE"));
+    wifiConnected = false;
     return false;
   }
 
@@ -485,6 +930,13 @@ bool espHttpJsonRequest(const char* method, const String& path, const String& pa
     if (resp.indexOf("CLOSED") != -1) break;
   }
   ESP_SERIAL.println(F("AT+CIPCLOSE"));
+
+  bool disconnected = (resp.indexOf("WIFI DISCONNECT") != -1) ||
+                      (resp.indexOf("CLOSED") != -1 && resp.indexOf("HTTP/1.1") == -1);
+  if (disconnected) {
+    wifiConnected = false;
+    Serial.println(F("[FB WARN] Link dropped during HTTP request."));
+  }
 
   bool ok = (resp.indexOf("HTTP/1.1 200") != -1) ||
             (resp.indexOf("HTTP/1.1 204") != -1);
@@ -1100,6 +1552,9 @@ void setup() {
   Serial.println(F("============================================"));
   Serial.println(F("[FAN] Type 0-100 and Enter to set manual fan speed."));
 
+  // ── EEPROM offline queue ──────────────────────────────
+  offlineQueueInit();
+
   // ── Fan ───────────────────────────────────────────────
   pinMode(FAN_PIN, OUTPUT);
   analogWrite(FAN_PIN, 0);  // Start off
@@ -1199,6 +1654,10 @@ void setup() {
 
   lastDHTTime = millis();
   lastWeightTime = millis();
+  lastOfflineStoreTime = millis();
+  lastOfflineFlushTime = millis();
+  lastReconnectAttempt = millis();
+  previousWifiConnected = wifiConnected;
 }
 
 
@@ -1208,6 +1667,23 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  if (wifiConnected != previousWifiConnected) {
+    Serial.print(F("[NET] WiFi state changed -> "));
+    Serial.println(wifiConnected ? F("ONLINE") : F("OFFLINE"));
+
+    if (!wifiConnected) {
+      // Start a fresh 5-minute offline capture window from disconnect time.
+      lastOfflineStoreTime = now;
+    } else {
+      // Trigger immediate backlog flush right after reconnect.
+      lastOfflineFlushTime = 0;
+    }
+
+    previousWifiConnected = wifiConnected;
+  }
+
+  attemptWiFiReconnect(now);
 
   // ── Blink ticker ───────────────────────────────────────
   if (now - lastBlinkTime >= BLINK_INTERVAL) {
@@ -1247,6 +1723,12 @@ void loop() {
     lastFirebasePush = now;
     firebasePushSensorLatest();
   }
+
+  // ── Buffer sensors to EEPROM every 5 min while offline ─
+  storeOfflineSampleIfDue(now);
+
+  // ── Flush buffered samples to Firebase when online ──────
+  flushOfflineQueueIfDue(now);
 
   // ── RFID check ─────────────────────────────────────────
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
