@@ -561,11 +561,12 @@ export function useFeedingControl(
 
       const eventsRef = ref(db, userFeedingEventsPath(uid));
       const eventRef = push(eventsRef);
-
-      await set(eventRef, {
+      const cleanPayload = pruneUndefined({
         ...payload,
         createdAt: Date.now(),
       });
+
+      await set(eventRef, cleanPayload);
     },
     [uid],
   );
