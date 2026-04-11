@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   DEFAULT_POLL_INTERVAL_MS,
   type PollIntervalMs,
@@ -12,12 +12,14 @@ function buildStorageKey(uid: string): string {
 }
 
 export function useUserPollInterval(uid: string | null | undefined) {
-  const [pollIntervalMs, setPollIntervalMsState] = useState<PollIntervalMs>(DEFAULT_POLL_INTERVAL_MS);
+  const [localOverride, setLocalOverride] = useState<{
+    uid: string | null;
+    value: PollIntervalMs;
+  } | null>(null);
 
-  useEffect(() => {
+  const storedPollInterval = useMemo<PollIntervalMs>(() => {
     if (!uid) {
-      setPollIntervalMsState(DEFAULT_POLL_INTERVAL_MS);
-      return;
+      return DEFAULT_POLL_INTERVAL_MS;
     }
 
     const key = buildStorageKey(uid);
@@ -25,23 +27,29 @@ export function useUserPollInterval(uid: string | null | undefined) {
     try {
       const storedValue = window.localStorage.getItem(key);
       if (storedValue == null) {
-        setPollIntervalMsState(DEFAULT_POLL_INTERVAL_MS);
-        return;
+        return DEFAULT_POLL_INTERVAL_MS;
       }
 
-      setPollIntervalMsState(sanitizePollInterval(Number(storedValue)));
+      return sanitizePollInterval(Number(storedValue));
     } catch {
-      // ignore localStorage read errors
-      setPollIntervalMsState(DEFAULT_POLL_INTERVAL_MS);
+      return DEFAULT_POLL_INTERVAL_MS;
     }
   }, [uid]);
+
+  const pollIntervalMs =
+    localOverride && localOverride.uid === (uid ?? null)
+      ? localOverride.value
+      : storedPollInterval;
 
   const setPollIntervalMs = useCallback(
     (nextValue: number) => {
       const safeValue = sanitizePollInterval(nextValue);
-      setPollIntervalMsState(safeValue);
 
       if (!uid) {
+        setLocalOverride({
+          uid: null,
+          value: safeValue,
+        });
         return;
       }
 
@@ -52,6 +60,11 @@ export function useUserPollInterval(uid: string | null | undefined) {
       } catch {
         // ignore localStorage write errors
       }
+
+      setLocalOverride({
+        uid,
+        value: safeValue,
+      });
     },
     [uid],
   );

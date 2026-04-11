@@ -7,6 +7,7 @@ import { useUserPollInterval } from '../hooks/useUserPollInterval';
 import { useRFIDBinding } from '../hooks/useRFIDBinding';
 import { useBoardConnection } from '../hooks/useBoardConnection';
 import { useFanSettings } from '../hooks/useFanSettings';
+import { useFeedingControl } from '../hooks/useFeedingControl';
 import SensorCard from '../components/SensorCard';
 import TempHumidityChart from '../components/TempHumidityChart';
 import RFIDLog from '../components/RFIDLog';
@@ -16,6 +17,33 @@ import {
   formatPollIntervalLabel,
 } from '../constants/pollInterval';
 import { buildDefaultRFIDName, isSameRFIDUid, normalizeRFIDUid } from '../utils/rfid';
+
+function normalizeScheduleTime(value: string): string | null {
+  const trimmed = value.trim();
+  const match = /^(\d{1,2}):(\d{1,2})$/.exec(trimmed);
+
+  if (!match) {
+    return null;
+  }
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function parseScheduleTimesInput(value: string): string[] {
+  const tokens = value
+    .split(/[\n,]/)
+    .map((token) => normalizeScheduleTime(token))
+    .filter((token): token is string => token != null);
+
+  return Array.from(new Set(tokens)).sort((a, b) => a.localeCompare(b));
+}
 
 type Tab = 'sensors' | 'rfid' | 'settings';
 
@@ -72,6 +100,18 @@ export default function Dashboard({ user }: Props) {
   const [fanAutoThresholdInput, setFanAutoThresholdInput] = useState(27);
   const [fanFormDirty, setFanFormDirty] = useState(false);
 
+  const [manualFeedingMsg, setManualFeedingMsg] = useState('');
+  const [feedingSettingsMsg, setFeedingSettingsMsg] = useState('');
+  const [feedingTimezoneInput, setFeedingTimezoneInput] = useState('Asia/Hong_Kong');
+  const [feedingScheduleEnabledInput, setFeedingScheduleEnabledInput] = useState(true);
+  const [feedingScheduleTimesInput, setFeedingScheduleTimesInput] = useState('08:00, 20:00');
+  const [feedingMotorRunMsInput, setFeedingMotorRunMsInput] = useState(1000);
+  const [feedingThresholdInput, setFeedingThresholdInput] = useState(2);
+  const [feedingConfirmationInput, setFeedingConfirmationInput] = useState(4500);
+  const [feedingRetryDelayInput, setFeedingRetryDelayInput] = useState(1200);
+  const [feedingMaxAttemptsInput, setFeedingMaxAttemptsInput] = useState(3);
+  const [feedingFormDirty, setFeedingFormDirty] = useState(false);
+
   const {
     connection: boardConnection,
     loading: boardLoading,
@@ -108,6 +148,20 @@ export default function Dashboard({ user }: Props) {
     error: fanError,
     saveSettings: saveFanSettings,
   } = useFanSettings(user.uid, pollIntervalMs);
+  const {
+    settings: feedingSettings,
+    runtime: feedingRuntime,
+    events: feedingEvents,
+    settingsLoading: feedingSettingsLoading,
+    runtimeLoading: feedingRuntimeLoading,
+    eventsLoading: feedingEventsLoading,
+    settingsSaving: feedingSettingsSaving,
+    triggering: feedingTriggering,
+    error: feedingError,
+    saveSettings: saveFeedingSettings,
+    triggerManualFeed,
+    clearAlert: clearFeedingAlert,
+  } = useFeedingControl(user.uid, data?.weight ?? null, pollIntervalMs);
 
   const latestScan = scans[0] ?? null;
 
@@ -138,6 +192,21 @@ export default function Dashboard({ user }: Props) {
     setFanAutoEnabledInput(fanSettings.autoEnabled);
     setFanAutoThresholdInput(fanSettings.autoThresholdC);
   }, [fanFormDirty, fanSettings]);
+
+  useEffect(() => {
+    if (feedingFormDirty) {
+      return;
+    }
+
+    setFeedingTimezoneInput(feedingSettings.timezone);
+    setFeedingScheduleEnabledInput(feedingSettings.scheduleEnabled);
+    setFeedingScheduleTimesInput(feedingSettings.scheduleTimes.join(', '));
+    setFeedingMotorRunMsInput(feedingSettings.motorRunMs);
+    setFeedingThresholdInput(feedingSettings.weightDeltaThresholdG);
+    setFeedingConfirmationInput(feedingSettings.confirmationTimeoutMs);
+    setFeedingRetryDelayInput(feedingSettings.retryDelayMs);
+    setFeedingMaxAttemptsInput(feedingSettings.maxAttempts);
+  }, [feedingFormDirty, feedingSettings]);
 
   // Check if user already has Google linked
   const hasGoogleLinked = user.providerData.some(p => p.providerId === 'google.com');
@@ -282,6 +351,46 @@ export default function Dashboard({ user }: Props) {
     }
   };
 
+  const handleManualFeed = async () => {
+    setManualFeedingMsg('');
+
+    const ok = await triggerManualFeed();
+    setManualFeedingMsg(ok ? '✓ 已完成投餵並確認重量變化' : '⚠ 投餵失敗，請檢查容器與馬達');
+  };
+
+  const handleSaveFeedingSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFeedingSettingsMsg('');
+
+    try {
+      const scheduleTimes = parseScheduleTimesInput(feedingScheduleTimesInput);
+      if (scheduleTimes.length === 0) {
+        throw new Error('請至少輸入一個時間（格式 HH:mm，例如 08:00）');
+      }
+
+      await saveFeedingSettings({
+        timezone: feedingTimezoneInput.trim() || 'Asia/Hong_Kong',
+        scheduleEnabled: feedingScheduleEnabledInput,
+        scheduleTimes,
+        motorRunMs: feedingMotorRunMsInput,
+        weightDeltaThresholdG: feedingThresholdInput,
+        confirmationTimeoutMs: feedingConfirmationInput,
+        retryDelayMs: feedingRetryDelayInput,
+        maxAttempts: feedingMaxAttemptsInput,
+      });
+
+      setFeedingFormDirty(false);
+      setFeedingSettingsMsg('✓ 自動投餵設定已儲存');
+    } catch (err: unknown) {
+      setFeedingSettingsMsg(err instanceof Error ? err.message : '投餵設定儲存失敗');
+    }
+  };
+
+  const handleClearFeedingAlert = async () => {
+    await clearFeedingAlert();
+    setFeedingSettingsMsg('✓ 已清除提醒');
+  };
+
   const fanSpeedDisplay =
     typeof data?.fanSpeed === 'number'
       ? Math.round(data.fanSpeed)
@@ -300,6 +409,26 @@ export default function Dashboard({ user }: Props) {
     typeof data?.fanAutoThresholdC === 'number'
       ? data.fanAutoThresholdC
       : fanSettings.autoThresholdC;
+
+  const feedingStatusTone = feedingRuntime.lastStatus === 'failed'
+    ? 'red'
+    : feedingRuntime.lastStatus === 'success'
+      ? 'green'
+      : 'blue';
+
+  const timezoneOptions = useMemo(() => {
+    const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    return Array.from(new Set([
+      'Asia/Hong_Kong',
+      localZone,
+      'Asia/Taipei',
+      'Asia/Tokyo',
+      'UTC',
+      'America/Los_Angeles',
+      'Europe/London',
+    ].filter(Boolean)));
+  }, []);
 
   const latestTapStatus = useMemo(() => {
     if (!latestScan) {
@@ -435,6 +564,52 @@ export default function Dashboard({ user }: Props) {
                   </div>
                 )}
 
+                <div className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm space-y-2">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">投餵控制</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleManualFeed}
+                      disabled={feedingTriggering || feedingRuntime.inProgress}
+                      className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                      style={{ backgroundColor: BLUE }}
+                    >
+                      {feedingTriggering || feedingRuntime.inProgress ? '投餵中…' : '轉一次（約 1 秒）'}
+                    </button>
+
+                    <span className="text-xs text-gray-500">
+                      狀態：{feedingRuntime.lastMessage}
+                    </span>
+                  </div>
+
+                  {(manualFeedingMsg || feedingError) && (
+                    <p
+                      className="text-sm"
+                      style={{
+                        color:
+                          (manualFeedingMsg && manualFeedingMsg.startsWith('✓'))
+                            ? '#16a34a'
+                            : '#dc2626',
+                      }}
+                    >
+                      {manualFeedingMsg || feedingError}
+                    </p>
+                  )}
+
+                  {feedingRuntime.alert && (
+                    <div className="rounded-2xl px-3 py-2 text-sm border bg-red-50 border-red-100 text-red-700 flex items-center justify-between gap-2">
+                      <span>已連續 3 次無重量變化，請檢查容器是否堵塞或空桶。</span>
+                      <button
+                        type="button"
+                        onClick={handleClearFeedingAlert}
+                        className="text-xs font-medium px-2.5 py-1 rounded-lg border border-red-200 text-red-700 hover:bg-red-100"
+                      >
+                        清除提醒
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
                   <SensorCard
                     label="溫度"
@@ -550,7 +725,7 @@ export default function Dashboard({ user }: Props) {
               <div className="space-y-4 max-w-lg">
                 <div className="mb-2">
                   <h2 className="text-xl font-bold text-gray-900">設定</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">帳戶、Board、風扇控制、同步頻率與 RFID 綁定</p>
+                  <p className="text-sm text-gray-400 mt-0.5">帳戶、Board、投餵、風扇控制、同步頻率與 RFID 綁定</p>
                 </div>
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
@@ -655,6 +830,234 @@ export default function Dashboard({ user }: Props) {
                     >
                       目前每 {formatPollIntervalLabel(pollIntervalMs)}
                     </span>
+                  </div>
+                </div>
+
+                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">投餵排程與時區設定</p>
+
+                  <p className="text-xs text-gray-500">
+                    目前狀態：
+                    {feedingSettingsLoading || feedingRuntimeLoading
+                      ? ' 讀取中…'
+                      : ` ${feedingRuntime.lastStatus === 'failed' ? '失敗' : feedingRuntime.lastStatus === 'success' ? '成功' : feedingRuntime.lastStatus === 'in_progress' ? '進行中' : '待命'} · ${feedingSettings.scheduleEnabled ? '排程啟用' : '排程停用'} · 時區 ${feedingSettings.timezone}`}
+                  </p>
+
+                  <div
+                    className={`rounded-2xl px-3 py-2 text-sm border ${
+                      feedingStatusTone === 'red'
+                        ? 'bg-red-50 border-red-100 text-red-700'
+                        : feedingStatusTone === 'green'
+                          ? 'bg-green-50 border-green-100 text-green-700'
+                          : 'bg-blue-50 border-blue-100 text-blue-700'
+                    }`}
+                  >
+                    {feedingRuntime.lastMessage}
+                  </div>
+
+                  <form className="space-y-3" onSubmit={handleSaveFeedingSettings}>
+                    <div>
+                      <label htmlFor="feeding-timezone" className="text-gray-500 text-xs mb-1 block">
+                        時區（預設 Hong Kong）
+                      </label>
+                      <select
+                        id="feeding-timezone"
+                        value={feedingTimezoneInput}
+                        onChange={(event) => {
+                          setFeedingTimezoneInput(event.target.value);
+                          setFeedingFormDirty(true);
+                        }}
+                        disabled={feedingSettingsSaving}
+                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      >
+                        {timezoneOptions.map((timezoneOption) => (
+                          <option key={timezoneOption} value={timezoneOption}>
+                            {timezoneOption}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={feedingScheduleEnabledInput}
+                        onChange={(event) => {
+                          setFeedingScheduleEnabledInput(event.target.checked);
+                          setFeedingFormDirty(true);
+                        }}
+                        disabled={feedingSettingsSaving}
+                      />
+                      啟用自動排程投餵
+                    </label>
+
+                    <div>
+                      <label htmlFor="feeding-schedule-times" className="text-gray-500 text-xs mb-1 block">
+                        排程時間（HH:mm，以逗號分隔）
+                      </label>
+                      <input
+                        id="feeding-schedule-times"
+                        value={feedingScheduleTimesInput}
+                        onChange={(event) => {
+                          setFeedingScheduleTimesInput(event.target.value);
+                          setFeedingFormDirty(true);
+                        }}
+                        disabled={feedingSettingsSaving}
+                        placeholder="08:00, 20:00"
+                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label htmlFor="feeding-motor-ms" className="text-gray-500 text-xs mb-1 block">
+                          單次馬達轉動時間（ms）
+                        </label>
+                        <input
+                          id="feeding-motor-ms"
+                          type="number"
+                          min={300}
+                          max={5000}
+                          step={100}
+                          value={feedingMotorRunMsInput}
+                          onChange={(event) => {
+                            setFeedingMotorRunMsInput(Number(event.target.value));
+                            setFeedingFormDirty(true);
+                          }}
+                          disabled={feedingSettingsSaving}
+                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="feeding-delta-threshold" className="text-gray-500 text-xs mb-1 block">
+                          重量差門檻（g）
+                        </label>
+                        <input
+                          id="feeding-delta-threshold"
+                          type="number"
+                          min={0.5}
+                          max={50}
+                          step={0.1}
+                          value={feedingThresholdInput}
+                          onChange={(event) => {
+                            setFeedingThresholdInput(Number(event.target.value));
+                            setFeedingFormDirty(true);
+                          }}
+                          disabled={feedingSettingsSaving}
+                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="feeding-confirm-ms" className="text-gray-500 text-xs mb-1 block">
+                          等待重量回傳（ms）
+                        </label>
+                        <input
+                          id="feeding-confirm-ms"
+                          type="number"
+                          min={1000}
+                          max={20000}
+                          step={100}
+                          value={feedingConfirmationInput}
+                          onChange={(event) => {
+                            setFeedingConfirmationInput(Number(event.target.value));
+                            setFeedingFormDirty(true);
+                          }}
+                          disabled={feedingSettingsSaving}
+                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="feeding-retry-delay" className="text-gray-500 text-xs mb-1 block">
+                          重試間隔（ms）
+                        </label>
+                        <input
+                          id="feeding-retry-delay"
+                          type="number"
+                          min={400}
+                          max={10000}
+                          step={100}
+                          value={feedingRetryDelayInput}
+                          onChange={(event) => {
+                            setFeedingRetryDelayInput(Number(event.target.value));
+                            setFeedingFormDirty(true);
+                          }}
+                          disabled={feedingSettingsSaving}
+                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="feeding-max-attempts" className="text-gray-500 text-xs mb-1 block">
+                          最多重試次數
+                        </label>
+                        <input
+                          id="feeding-max-attempts"
+                          type="number"
+                          min={1}
+                          max={5}
+                          step={1}
+                          value={feedingMaxAttemptsInput}
+                          onChange={(event) => {
+                            setFeedingMaxAttemptsInput(Number(event.target.value));
+                            setFeedingFormDirty(true);
+                          }}
+                          disabled={feedingSettingsSaving}
+                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={feedingSettingsSaving || feedingSettingsLoading}
+                      className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                      style={{ backgroundColor: BLUE }}
+                    >
+                      {feedingSettingsSaving ? '儲存中…' : '儲存投餵設定'}
+                    </button>
+                  </form>
+
+                  {(feedingSettingsMsg || feedingError) && (
+                    <p
+                      className="text-sm"
+                      style={{
+                        color:
+                          (feedingSettingsMsg && feedingSettingsMsg.startsWith('✓'))
+                            ? '#16a34a'
+                            : '#dc2626',
+                      }}
+                    >
+                      {feedingSettingsMsg || feedingError}
+                    </p>
+                  )}
+
+                  <div className="space-y-1">
+                    <p className="text-gray-500 text-xs">最近投餵紀錄：</p>
+                    {feedingEventsLoading ? (
+                      <p className="text-xs text-gray-400">讀取中…</p>
+                    ) : feedingEvents.length === 0 ? (
+                      <p className="text-xs text-gray-400">尚無投餵紀錄</p>
+                    ) : (
+                      <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                        {feedingEvents.slice(0, 6).map((eventItem) => (
+                          <div
+                            key={eventItem.id}
+                            className="text-xs bg-gray-50 border border-gray-100 rounded-xl px-2.5 py-2 text-gray-600"
+                          >
+                            <p className="font-medium text-gray-700">
+                              {new Date(eventItem.createdAt).toLocaleString()} · {eventItem.source} · #{eventItem.attempt} · {eventItem.type}
+                            </p>
+                            <p>{eventItem.message}</p>
+                            {typeof eventItem.delta === 'number' && (
+                              <p className="text-gray-500">重量變化：{eventItem.delta.toFixed(1)}g</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
 

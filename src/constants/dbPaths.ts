@@ -36,3 +36,33 @@ export function legacyFanSettingsPath(): string {
 export function legacyFanSettingsDeprecatedPath(): string {
   return 'fan/settings';
 }
+
+export function userFeedingSettingsPath(uid: string): string {
+  return `users/${uid}/feeding/settings`;
+}
+
+// Shared path for firmware/frontend interop.
+export function legacyFeedingSettingsPath(): string {
+  return 'sensors/feeding/settings';
+}
+
+export function userFeedingCommandPath(uid: string): string {
+  return `users/${uid}/feeding/command`;
+}
+
+// Shared path for firmware/frontend interop.
+export function legacyFeedingCommandPath(): string {
+  return 'sensors/feeding/command';
+}
+
+export function userFeedingEventsPath(uid: string): string {
+  return `users/${uid}/feeding/events`;
+}
+
+export function userFeedingRuntimePath(uid: string): string {
+  return `users/${uid}/feeding/runtime`;
+}
+
+export function userFeedingScheduleTriggerPath(uid: string): string {
+  return `users/${uid}/feeding/runtime/scheduleTriggers`;
+}
