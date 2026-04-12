@@ -1,5 +1,5 @@
 /*************************************************************
- * COMBINED: RFID-RC522 + HC-SR04 + DHT11 + HX711 + SSD1306 OLED + ESP8266 + FAN
+ * COMBINED: RFID-RC522 + HC-SR04 + DHT11 + HX711 + SSD1306 OLED + ESP8266 + FAN + FEEDER MOTOR/PUMP
  * TARGET: Arduino Mega 2560
  * THEME: Cyberpunk HUD  v1.4
  *
@@ -54,6 +54,14 @@
  *  MOSFET Module OUT+   → Fan red wire  (+)
  *  MOSFET Module OUT-   → Fan black wire (-)
  *  Serial control: type 0–100 and press Enter to set fan speed %
+ *
+ * --- FEEDER MOTOR + PUMP (L298N + IRLZ44N) ---
+ *  L298N ENA   → Mega Pin 12 (PWM)
+ *  L298N IN1   → Mega Pin 7
+ *  L298N IN2   → Mega Pin 11
+ *  IRLZ44N GATE→ Mega Pin 10 (Pump MOSFET)
+ *  Command source: Firebase /sensors/feeding/command
+ *  Supported action: "dispenseOnce" (motorRunMs: 300~5000 ms)
  *
  * LIBRARIES REQUIRED:
  *  - MFRC522 by GithubCommunity
@@ -123,6 +131,21 @@ int       fanManualPercent = 100;  // Frontend manual ON uses 100%
 bool      fanAutoEnabled = true;
 float     fanAutoThresholdC = 27.0;
 bool      fanAutoTriggered = false;
+
+// ── Feeder Motor/Pump (food dispensing actuator) ───────────
+const int FEED_MOTOR_ENA_PIN = 12;      // L298N ENA (PWM speed)
+const int FEED_MOTOR_IN1_PIN = 7;       // L298N IN1 (direction)
+const int FEED_MOTOR_IN2_PIN = 11;      // L298N IN2 (direction)
+const int FEED_PUMP_PIN      = 10;      // IRLZ44N gate (optional pump)
+const int FEED_DISPENSE_SPEED_PERCENT = 100;
+const bool FEED_PUMP_WITH_MOTOR = false; // Keep false for food-only dispenser
+const int FEED_RUN_MS_DEFAULT = 1000;
+const int FEED_RUN_MS_MIN     = 300;
+const int FEED_RUN_MS_MAX     = 5000;
+
+int  feederMotorSpeed = 0;   // -100..100
+bool feederPumpOn = false;
+char lastFeedingRequestId[48] = "";
 
 // ── OLED Config ────────────────────────────────────────────
 #define OLED_W      128
@@ -221,6 +244,7 @@ unsigned long lastDHTTime      = 0;
 unsigned long lastWeightTime   = 0;
 unsigned long lastFirebasePush = 0;
 unsigned long lastFanControlPull = 0;
+unsigned long lastFeedingControlPull = 0;
 unsigned long lastOfflineStoreTime = 0;
 unsigned long lastOfflineFlushTime = 0;
 unsigned long lastReconnectAttempt = 0;
@@ -234,6 +258,7 @@ const unsigned long DHT_INTERVAL                  = 3000;
 const unsigned long WEIGHT_INTERVAL               = 1500;
 const unsigned long FIREBASE_SENSOR_INTERVAL      = 3000;
 const unsigned long FIREBASE_FAN_CONTROL_INTERVAL = 2500;
+const unsigned long FIREBASE_FEEDING_CONTROL_INTERVAL = 1200;
 const unsigned long OFFLINE_STORE_INTERVAL         = 300000;
 const unsigned long OFFLINE_FLUSH_INTERVAL         = 2000;
 const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
@@ -241,10 +266,15 @@ const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
 // Forward declarations used before concrete definitions.
 void configureESP8266SSL();
 bool firebasePullFanSettings();
+bool firebasePullFeedingCommand();
 void firebasePushSensorLatest();
 String firebaseAuthQuery();
 bool espHttpJsonRequest(const char* method, const String& path, const String& payload,
                         String* responseOut = NULL);
+bool isSignedIntegerString(const String& input);
+void setFeederMotorSpeed(int speedPercent);
+void setFeederPump(bool on);
+bool runFeederDispenseOnce(int motorRunMs);
 
 
 // ═══════════════════════════════════════════════════════════
@@ -636,8 +666,8 @@ void applyFanControlLogic() {
 }
 
 // Called every loop() — non-blocking serial read
-// Debug helper for USB serial monitor: type 0~100 then Enter.
-void checkSerialFanInput() {
+// USB serial helper for fan + feeder diagnostics.
+void checkSerialCommandInput() {
   if (Serial.available() <= 0) {
     return;
   }
@@ -645,6 +675,68 @@ void checkSerialFanInput() {
   String input = Serial.readStringUntil('\n');
   input.trim();
   if (input.length() == 0) {
+    return;
+  }
+
+  if (input.equalsIgnoreCase("help")) {
+    Serial.println(F("--- Serial Commands ---"));
+    Serial.println(F("0~100              : fan manual speed (%)"));
+    Serial.println(F("motor <speed>      : feeder motor -100..100"));
+    Serial.println(F("pump on|off        : feeder pump control"));
+    Serial.println(F("dispense [runMs]   : run one feed cycle"));
+    Serial.println(F("help               : show this list"));
+    Serial.println(F("-----------------------"));
+    return;
+  }
+
+  if (input.startsWith("motor ")) {
+    String param = input.substring(6);
+    param.trim();
+    if (!isSignedIntegerString(param)) {
+      Serial.println(F("[FEED] motor expects an integer (-100..100)."));
+      return;
+    }
+
+    int speedVal = constrain(param.toInt(), -100, 100);
+    setFeederMotorSpeed(speedVal);
+    Serial.print(F("[FEED] Motor speed set to "));
+    Serial.print(speedVal);
+    Serial.println(F("%"));
+    return;
+  }
+
+  if (input.equalsIgnoreCase("pump on")) {
+    setFeederPump(true);
+    Serial.println(F("[FEED] Pump turned ON"));
+    return;
+  }
+
+  if (input.equalsIgnoreCase("pump off")) {
+    setFeederPump(false);
+    Serial.println(F("[FEED] Pump turned OFF"));
+    return;
+  }
+
+  if (input.startsWith("dispense")) {
+    int runMs = FEED_RUN_MS_DEFAULT;
+    if (input.length() > 8) {
+      String param = input.substring(8);
+      param.trim();
+      if (param.length() > 0) {
+        if (!isSignedIntegerString(param)) {
+          Serial.println(F("[FEED] dispense expects optional integer runMs."));
+          return;
+        }
+        runMs = param.toInt();
+      }
+    }
+
+    runFeederDispenseOnce(runMs);
+    return;
+  }
+
+  if (!isSignedIntegerString(input)) {
+    Serial.println(F("[SERIAL] Unknown command. Type 'help' for list."));
     return;
   }
 
@@ -662,6 +754,61 @@ void checkSerialFanInput() {
   Serial.println(F("%"));
 
   applyFanControlLogic();
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  FEEDER MOTOR/PUMP CONTROL
+// ═══════════════════════════════════════════════════════════
+
+void setFeederMotorSpeed(int speedPercent) {
+  int safeSpeed = constrain(speedPercent, -100, 100);
+  if (feederMotorSpeed == safeSpeed) {
+    return;
+  }
+
+  feederMotorSpeed = safeSpeed;
+
+  if (safeSpeed > 0) {
+    digitalWrite(FEED_MOTOR_IN1_PIN, HIGH);
+    digitalWrite(FEED_MOTOR_IN2_PIN, LOW);
+  } else if (safeSpeed < 0) {
+    digitalWrite(FEED_MOTOR_IN1_PIN, LOW);
+    digitalWrite(FEED_MOTOR_IN2_PIN, HIGH);
+  } else {
+    digitalWrite(FEED_MOTOR_IN1_PIN, LOW);
+    digitalWrite(FEED_MOTOR_IN2_PIN, LOW);
+  }
+
+  int pwmValue = map(abs(safeSpeed), 0, 100, 0, 255);
+  analogWrite(FEED_MOTOR_ENA_PIN, pwmValue);
+}
+
+void setFeederPump(bool on) {
+  feederPumpOn = on;
+  digitalWrite(FEED_PUMP_PIN, on ? HIGH : LOW);
+}
+
+bool runFeederDispenseOnce(int motorRunMs) {
+  int safeRunMs = constrain(motorRunMs, FEED_RUN_MS_MIN, FEED_RUN_MS_MAX);
+
+  Serial.print(F("[FEED] Dispense start | runMs="));
+  Serial.println(safeRunMs);
+
+  setFeederMotorSpeed(FEED_DISPENSE_SPEED_PERCENT);
+  if (FEED_PUMP_WITH_MOTOR) {
+    setFeederPump(true);
+  }
+
+  delay(safeRunMs);
+
+  setFeederMotorSpeed(0);
+  if (FEED_PUMP_WITH_MOTOR) {
+    setFeederPump(false);
+  }
+
+  Serial.println(F("[FEED] Dispense done."));
+  return true;
 }
 
 
@@ -740,6 +887,8 @@ void attemptWiFiReconnect(unsigned long now) {
   configureESP8266SSL();
   firebasePullFanSettings();
   lastFanControlPull = now;
+  firebasePullFeedingCommand();
+  lastFeedingControlPull = now;
   firebasePushSensorLatest();
   lastFirebasePush = now;
   lastOfflineFlushTime = 0;
@@ -1048,6 +1197,101 @@ bool jsonReadFloat(const String& json, const char* key, float* outValue) {
   return true;
 }
 
+bool jsonReadString(const String& json, const char* key, String* outValue) {
+  if (!outValue) {
+    return false;
+  }
+
+  int colon = jsonFindKeyColon(json, key);
+  if (colon < 0) {
+    return false;
+  }
+
+  int start = jsonSkipSpace(json, colon + 1);
+  if (start >= json.length()) {
+    return false;
+  }
+
+  if (json[start] == '"') {
+    start++;
+    String value = "";
+
+    for (int i = start; i < json.length(); i++) {
+      char c = json[i];
+      if (c == '\\') {
+        if (i + 1 < json.length()) {
+          value += json[i + 1];
+          i++;
+        }
+        continue;
+      }
+
+      if (c == '"') {
+        *outValue = value;
+        return true;
+      }
+
+      value += c;
+    }
+
+    return false;
+  }
+
+  int end = start;
+  while (end < json.length()) {
+    char c = json[end];
+    if (c == ',' || c == '}' || c == '\r' || c == '\n' || c == '\t' || c == ' ') {
+      break;
+    }
+    end++;
+  }
+
+  if (end <= start) {
+    return false;
+  }
+
+  *outValue = json.substring(start, end);
+  return true;
+}
+
+bool extractHttpBody(const String& response, String* outBody) {
+  if (!outBody) {
+    return false;
+  }
+
+  int bodyPos = response.indexOf("\r\n\r\n");
+  if (bodyPos < 0) {
+    return false;
+  }
+
+  *outBody = response.substring(bodyPos + 4);
+  outBody->trim();
+  return true;
+}
+
+bool isSignedIntegerString(const String& input) {
+  if (input.length() == 0) {
+    return false;
+  }
+
+  int start = 0;
+  if (input[0] == '+' || input[0] == '-') {
+    start = 1;
+  }
+
+  if (start >= input.length()) {
+    return false;
+  }
+
+  for (int i = start; i < input.length(); i++) {
+    if (input[i] < '0' || input[i] > '9') {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool firebasePullFanSettings() {
   const char* settingsPaths[] = {
     "/sensors/fanSettings.json",  // preferred shared path
@@ -1147,6 +1391,128 @@ bool firebasePullFanSettings() {
 
   applyFanControlLogic();
   return false;
+}
+
+bool firebasePatchFeedingCommandStatus(const char* status,
+                                       bool executed,
+                                       int appliedMotorRunMs,
+                                       const char* note) {
+  String payload = "{";
+  payload += "\"status\":\"";
+  payload += status;
+  payload += "\",";
+  payload += "\"executed\":";
+  payload += (executed ? "true" : "false");
+  payload += ",";
+  payload += "\"processedBy\":\"" DEVICE_ID "\",";
+  payload += "\"processedAt\":{\".sv\":\"timestamp\"},";
+  payload += "\"appliedMotorRunMs\":";
+  payload += String(appliedMotorRunMs);
+  payload += ",";
+  payload += "\"note\":\"";
+  payload += note;
+  payload += "\"";
+  payload += "}";
+
+  String path = "/sensors/feeding/command.json";
+  path += firebaseAuthQuery();
+
+  return espHttpJsonRequest("PATCH", path, payload);
+}
+
+bool firebasePullFeedingCommand() {
+  String response;
+  String path = "/sensors/feeding/command.json";
+  path += firebaseAuthQuery();
+
+  if (!espHttpJsonRequest("GET", path, "", &response)) {
+    Serial.println(F("[FEED WARN] feeding/command fetch failed."));
+    return false;
+  }
+
+  String body;
+  if (!extractHttpBody(response, &body)) {
+    Serial.println(F("[FEED WARN] feeding/command response has no body."));
+    return false;
+  }
+
+  if (body.length() == 0 || body == "null") {
+    return false;
+  }
+
+  String action;
+  if (!jsonReadString(body, "action", &action)) {
+    return false;
+  }
+  action.trim();
+
+  if (!action.equalsIgnoreCase("dispenseOnce")) {
+    return false;
+  }
+
+  String status;
+  if (jsonReadString(body, "status", &status)) {
+    status.trim();
+    if (!status.equalsIgnoreCase("pending")) {
+      return true;
+    }
+  }
+
+  String requestId;
+  if (!jsonReadString(body, "requestId", &requestId)) {
+    requestId = "";
+  }
+  requestId.trim();
+
+  if (requestId.length() == 0) {
+    String groupId;
+    if (jsonReadString(body, "requestGroupId", &groupId)) {
+      groupId.trim();
+      requestId = groupId;
+    }
+  }
+
+  if (requestId.length() == 0) {
+    requestId = String("req-") + String(millis());
+  }
+
+  int motorRunMs = FEED_RUN_MS_DEFAULT;
+  float motorRunMsFloat;
+  if (jsonReadFloat(body, "motorRunMs", &motorRunMsFloat)) {
+    motorRunMs = (int)(motorRunMsFloat + (motorRunMsFloat >= 0 ? 0.5f : -0.5f));
+  } else {
+    String motorRunMsText;
+    if (jsonReadString(body, "motorRunMs", &motorRunMsText)) {
+      motorRunMsText.trim();
+      if (isSignedIntegerString(motorRunMsText)) {
+        motorRunMs = motorRunMsText.toInt();
+      }
+    }
+  }
+  motorRunMs = constrain(motorRunMs, FEED_RUN_MS_MIN, FEED_RUN_MS_MAX);
+
+  if (strlen(lastFeedingRequestId) > 0 && requestId == String(lastFeedingRequestId)) {
+    // Already executed this request. Try to heal stale "pending" status without rerunning motor.
+    firebasePatchFeedingCommandStatus("done", true, motorRunMs, "deduplicated-no-rerun");
+    return true;
+  }
+
+  Serial.print(F("[FEED] New pending command id="));
+  Serial.print(requestId);
+  Serial.print(F(" runMs="));
+  Serial.println(motorRunMs);
+
+  runFeederDispenseOnce(motorRunMs);
+
+  strncpy(lastFeedingRequestId, requestId.c_str(), sizeof(lastFeedingRequestId) - 1);
+  lastFeedingRequestId[sizeof(lastFeedingRequestId) - 1] = '\0';
+
+  if (!firebasePatchFeedingCommandStatus("done", true, motorRunMs, "dispense-complete")) {
+    Serial.println(F("[FEED WARN] Failed to patch feeding command status."));
+  }
+
+  firebasePushSensorLatest();
+  return true;
 }
 
 void firebasePushSensorLatest() {
@@ -1547,7 +1913,7 @@ void setup() {
   while (!Serial && millis() < 3000);
 
   Serial.println(F("============================================"));
-  Serial.println(F("RFID + HC-SR04 + DHT11 + HX711 + OLED + ESP + FAN"));
+  Serial.println(F("RFID + HC-SR04 + DHT11 + HX711 + OLED + ESP + FAN + FEEDER"));
   Serial.println(F("           CYBERPUNK HUD  v1.4              "));
   Serial.println(F("============================================"));
   Serial.println(F("[FAN] Type 0-100 and Enter to set manual fan speed."));
@@ -1560,6 +1926,30 @@ void setup() {
   analogWrite(FAN_PIN, 0);  // Start off
   applyFanControlLogic();
   Serial.println(F("[FAN] N-MOSFET fan ready on pin 6."));
+
+  // ── Feeder Motor + Pump ───────────────────────────────
+  pinMode(FEED_MOTOR_ENA_PIN, OUTPUT);
+  pinMode(FEED_MOTOR_IN1_PIN, OUTPUT);
+  pinMode(FEED_MOTOR_IN2_PIN, OUTPUT);
+  pinMode(FEED_PUMP_PIN, OUTPUT);
+
+  digitalWrite(FEED_MOTOR_IN1_PIN, LOW);
+  digitalWrite(FEED_MOTOR_IN2_PIN, LOW);
+  analogWrite(FEED_MOTOR_ENA_PIN, 0);
+  digitalWrite(FEED_PUMP_PIN, LOW);
+  feederMotorSpeed = 0;
+  feederPumpOn = false;
+
+  Serial.print(F("[FEED] Motor ready on ENA="));
+  Serial.print(FEED_MOTOR_ENA_PIN);
+  Serial.print(F(", IN1="));
+  Serial.print(FEED_MOTOR_IN1_PIN);
+  Serial.print(F(", IN2="));
+  Serial.print(FEED_MOTOR_IN2_PIN);
+  Serial.print(F(" | Pump pin="));
+  Serial.print(FEED_PUMP_PIN);
+  Serial.print(F(" | Pump with motor="));
+  Serial.println(FEED_PUMP_WITH_MOTOR ? F("ON") : F("OFF"));
 
   // ── RFID ──────────────────────────────────────────────
   SPI.begin();
@@ -1638,6 +2028,9 @@ void setup() {
     firebasePullFanSettings();
     lastFanControlPull = millis();
 
+    firebasePullFeedingCommand();
+    lastFeedingControlPull = millis();
+
     firebasePushSensorLatest();
     lastFirebasePush = millis();
   }
@@ -1654,6 +2047,7 @@ void setup() {
 
   lastDHTTime = millis();
   lastWeightTime = millis();
+  lastFeedingControlPull = millis();
   lastOfflineStoreTime = millis();
   lastOfflineFlushTime = millis();
   lastReconnectAttempt = millis();
@@ -1691,8 +2085,8 @@ void loop() {
     blinkState    = !blinkState;
   }
 
-  // ── Fan speed via Serial input (non-blocking) ──────────
-  checkSerialFanInput();
+  // ── Serial commands (fan + feeder diagnostics) ─────────
+  checkSerialCommandInput();
 
   // ── Distance reading ───────────────────────────────────
   if (now - lastDistanceTime >= DISTANCE_INTERVAL) {
@@ -1716,6 +2110,12 @@ void loop() {
   if (wifiConnected && (now - lastFanControlPull >= FIREBASE_FAN_CONTROL_INTERVAL)) {
     lastFanControlPull = now;
     firebasePullFanSettings();
+  }
+
+  // ── Pull feeding command from Firebase ─────────────────
+  if (wifiConnected && (now - lastFeedingControlPull >= FIREBASE_FEEDING_CONTROL_INTERVAL)) {
+    lastFeedingControlPull = now;
+    firebasePullFeedingCommand();
   }
 
   // ── Firebase push (for Web App realtime display) ───────

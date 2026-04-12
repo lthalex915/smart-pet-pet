@@ -594,13 +594,12 @@ export function useFeedingControl(
 
   const writeFeedingCommand = useCallback(
     async (payload: Record<string, unknown>) => {
-      let wroteAny = false;
+      let wroteLegacy = false;
       let firstError: unknown = null;
 
       if (userCommandRef) {
         try {
           await set(userCommandRef, payload);
-          wroteAny = true;
         } catch (err: unknown) {
           firstError = firstError ?? err;
         }
@@ -608,13 +607,13 @@ export function useFeedingControl(
 
       try {
         await set(legacyCommandRef, payload);
-        wroteAny = true;
+        wroteLegacy = true;
       } catch (err: unknown) {
         firstError = firstError ?? err;
       }
 
-      if (!wroteAny) {
-        throw (firstError instanceof Error ? firstError : new Error('寫入投餵命令失敗'));
+      if (!wroteLegacy) {
+        throw (firstError instanceof Error ? firstError : new Error('寫入投餵命令失敗（legacy command path）'));
       }
     },
     [legacyCommandRef, userCommandRef],
