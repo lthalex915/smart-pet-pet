@@ -18,6 +18,9 @@ type RawSensorData = Partial<SensorData> & {
   t?: unknown;
   h?: unknown;
   w?: unknown;
+  fcl?: unknown;
+  fct?: unknown;
+  wpi?: unknown;
   hf?: unknown;
   f?: unknown;
   fmo?: unknown;
@@ -34,6 +37,15 @@ function asFiniteNumber(value: unknown): number | null {
 
 function asBooleanOrNull(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
+}
+
+function asNonNegativeNumber(value: unknown): number | null {
+  const parsed = asFiniteNumber(value);
+  if (parsed == null) {
+    return null;
+  }
+
+  return Math.max(0, parsed);
 }
 
 function toTrendPoint(snapshot: DataSnapshot): SensorTrendPoint {
@@ -60,7 +72,13 @@ function normalizeSensorData(value: SensorData | null): SensorData | null {
   const noEcho = asBooleanOrNull(raw.noEcho) ?? asBooleanOrNull(raw.n) ?? false;
   const temperature = asFiniteNumber(raw.temperature) ?? asFiniteNumber(raw.t);
   const humidity = asFiniteNumber(raw.humidity) ?? asFiniteNumber(raw.h);
-  const weight = asFiniteNumber(raw.weight) ?? asFiniteNumber(raw.w);
+  const weight = asNonNegativeNumber(raw.weight) ?? asNonNegativeNumber(raw.w);
+  const foodConsumedLastG = asNonNegativeNumber(raw.foodConsumedLastG) ?? asNonNegativeNumber(raw.fcl);
+  const foodConsumedTotalG = asNonNegativeNumber(raw.foodConsumedTotalG) ?? asNonNegativeNumber(raw.fct);
+  const waterPumpIntervalMinRaw = asFiniteNumber(raw.waterPumpIntervalMin) ?? asFiniteNumber(raw.wpi);
+  const waterPumpIntervalMin = waterPumpIntervalMinRaw == null
+    ? undefined
+    : Math.max(15, Math.min(30, Math.round(waterPumpIntervalMinRaw / 5) * 5));
   const hasFood = asBooleanOrNull(raw.hasFood) ?? asBooleanOrNull(raw.hf) ?? false;
   const fanSpeed = asFiniteNumber(raw.fanSpeed) ?? asFiniteNumber(raw.f);
   const fanManualOn = asBooleanOrNull(raw.fanManualOn) ?? asBooleanOrNull(raw.fmo);
@@ -77,6 +95,9 @@ function normalizeSensorData(value: SensorData | null): SensorData | null {
     temperature,
     humidity,
     weight,
+    foodConsumedLastG: foodConsumedLastG ?? undefined,
+    foodConsumedTotalG: foodConsumedTotalG ?? undefined,
+    waterPumpIntervalMin,
     hasFood,
     fanSpeed: fanSpeed ?? undefined,
     fanManualOn: fanManualOn ?? undefined,

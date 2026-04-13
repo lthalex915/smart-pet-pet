@@ -111,6 +111,10 @@ npm run dev
 - `users/{uid}/sensors/history`
 - `users/{uid}/rfidScans`
 - `users/{uid}/fan/settings`
+- `users/{uid}/feeding/settings`
+- `users/{uid}/feeding/runtime`
+- `users/{uid}/feeding/events`
+- `users/{uid}/feeding/consumption`
 
 另外也支援舊版（legacy）全域路徑作為 fallback：
 
@@ -118,6 +122,9 @@ npm run dev
 - `sensors/history`
 - `rfidScans`
 - `sensors/fanSettings`（風扇控制共享路徑）
+- `sensors/feeding/settings`（投餵/水泵設定共享路徑）
+- `sensors/feeding/command`（投餵命令共享路徑）
+- `sensors/feeding/consumption`（食用量統計共享路徑）
 - `fan/settings`（舊版相容，建議保留唯讀）
 
 > 建議正式環境改為僅允許使用者讀寫自己的 `users/{uid}` 區域。

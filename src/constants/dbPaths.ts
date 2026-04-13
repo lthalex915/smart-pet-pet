@@ -66,3 +66,11 @@ export function userFeedingRuntimePath(uid: string): string {
 export function userFeedingScheduleTriggerPath(uid: string): string {
   return `users/${uid}/feeding/runtime/scheduleTriggers`;
 }
+
+export function userFeedingConsumptionPath(uid: string): string {
+  return `users/${uid}/feeding/consumption`;
+}
+
+export function legacyFeedingConsumptionPath(): string {
+  return 'sensors/feeding/consumption';
+}

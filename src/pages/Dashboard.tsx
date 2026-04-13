@@ -107,6 +107,7 @@ export default function Dashboard({ user }: Props) {
   const [feedingScheduleTimesInput, setFeedingScheduleTimesInput] = useState('08:00, 20:00');
   const [feedingMotorRunMsInput, setFeedingMotorRunMsInput] = useState(1000);
   const [feedingThresholdInput, setFeedingThresholdInput] = useState(2);
+  const [waterPumpIntervalMinInput, setWaterPumpIntervalMinInput] = useState(20);
   const [feedingConfirmationInput, setFeedingConfirmationInput] = useState(4500);
   const [feedingRetryDelayInput, setFeedingRetryDelayInput] = useState(1200);
   const [feedingMaxAttemptsInput, setFeedingMaxAttemptsInput] = useState(3);
@@ -203,6 +204,7 @@ export default function Dashboard({ user }: Props) {
     setFeedingScheduleTimesInput(feedingSettings.scheduleTimes.join(', '));
     setFeedingMotorRunMsInput(feedingSettings.motorRunMs);
     setFeedingThresholdInput(feedingSettings.weightDeltaThresholdG);
+    setWaterPumpIntervalMinInput(feedingSettings.waterPumpIntervalMin);
     setFeedingConfirmationInput(feedingSettings.confirmationTimeoutMs);
     setFeedingRetryDelayInput(feedingSettings.retryDelayMs);
     setFeedingMaxAttemptsInput(feedingSettings.maxAttempts);
@@ -374,6 +376,7 @@ export default function Dashboard({ user }: Props) {
         scheduleTimes,
         motorRunMs: feedingMotorRunMsInput,
         weightDeltaThresholdG: feedingThresholdInput,
+        waterPumpIntervalMin: waterPumpIntervalMinInput,
         confirmationTimeoutMs: feedingConfirmationInput,
         retryDelayMs: feedingRetryDelayInput,
         maxAttempts: feedingMaxAttemptsInput,
@@ -610,7 +613,7 @@ export default function Dashboard({ user }: Props) {
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
+                <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 md:gap-4">
                   <SensorCard
                     label="溫度"
                     value={data?.temperature != null
@@ -636,6 +639,14 @@ export default function Dashboard({ user }: Props) {
                     loading={loading}
                   />
                   <SensorCard
+                    label="本次食用量"
+                    value={typeof data?.foodConsumedLastG === 'number'
+                      ? data.foodConsumedLastG.toFixed(1)
+                      : '--'}
+                    unit="g"
+                    loading={loading}
+                  />
+                  <SensorCard
                     label="飼料狀態"
                     value={data
                       ? data.hasFood
@@ -653,6 +664,12 @@ export default function Dashboard({ user }: Props) {
                     loading={loading && fanLoading}
                   />
                 </div>
+
+                {!loading && typeof data?.foodConsumedTotalG === 'number' && (
+                  <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-emerald-50 border-emerald-100 text-emerald-700">
+                    累積食用量：{data.foodConsumedTotalG.toFixed(1)}g
+                  </div>
+                )}
 
                 {!loading && data && !data.hasFood && (
                   <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-red-50 border-red-100 text-red-700">
@@ -947,6 +964,28 @@ export default function Dashboard({ user }: Props) {
                           disabled={feedingSettingsSaving}
                           className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
                         />
+                      </div>
+
+                      <div>
+                        <label htmlFor="water-pump-interval" className="text-gray-500 text-xs mb-1 block">
+                          水泵補水頻率（分鐘）
+                        </label>
+                        <select
+                          id="water-pump-interval"
+                          value={waterPumpIntervalMinInput}
+                          onChange={(event) => {
+                            setWaterPumpIntervalMinInput(Number(event.target.value));
+                            setFeedingFormDirty(true);
+                          }}
+                          disabled={feedingSettingsSaving}
+                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        >
+                          {[15, 20, 25, 30].map((minutes) => (
+                            <option key={minutes} value={minutes}>
+                              每 {minutes} 分鐘
+                            </option>
+                          ))}
+                        </select>
                       </div>
 
                       <div>

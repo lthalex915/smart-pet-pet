@@ -40,6 +40,7 @@ export const DEFAULT_FEEDING_SETTINGS: FeedingSettings = {
   scheduleTimes: ['08:00', '20:00'],
   motorRunMs: 1_000,
   weightDeltaThresholdG: 2,
+  waterPumpIntervalMin: 20,
   confirmationTimeoutMs: 4_500,
   retryDelayMs: 1_200,
   maxAttempts: 3,
@@ -150,6 +151,14 @@ function normalizeFeedingSettings(value: Partial<FeedingSettings> | null | undef
     ? value.confirmationTimeoutMs
     : DEFAULT_FEEDING_SETTINGS.confirmationTimeoutMs;
 
+  const waterPumpIntervalMinRaw = typeof value?.waterPumpIntervalMin === 'number'
+    ? value.waterPumpIntervalMin
+    : DEFAULT_FEEDING_SETTINGS.waterPumpIntervalMin;
+
+  const waterPumpIntervalMin = [15, 20, 25, 30].includes(Math.round(waterPumpIntervalMinRaw))
+    ? Math.round(waterPumpIntervalMinRaw)
+    : DEFAULT_FEEDING_SETTINGS.waterPumpIntervalMin;
+
   const retryDelayMs = typeof value?.retryDelayMs === 'number'
     ? value.retryDelayMs
     : DEFAULT_FEEDING_SETTINGS.retryDelayMs;
@@ -167,6 +176,7 @@ function normalizeFeedingSettings(value: Partial<FeedingSettings> | null | undef
     scheduleTimes: normalizeScheduleTimes(value?.scheduleTimes),
     motorRunMs: clampInt(motorRunMs, 300, 5_000),
     weightDeltaThresholdG: Number(clampFloat(weightDeltaThresholdG, 0.5, 50).toFixed(1)),
+    waterPumpIntervalMin,
     confirmationTimeoutMs: clampInt(confirmationTimeoutMs, 1_000, 20_000),
     retryDelayMs: clampInt(retryDelayMs, 400, 10_000),
     maxAttempts: clampInt(maxAttempts, 1, 5),
@@ -290,7 +300,7 @@ async function fetchLatestWeight(uid: string): Promise<number | null> {
   const weight = typeof value?.weight === 'number' ? value.weight : value?.w;
 
   return typeof weight === 'number' && Number.isFinite(weight)
-    ? Number(weight.toFixed(1))
+    ? Number(Math.max(0, weight).toFixed(1))
     : null;
 }
 

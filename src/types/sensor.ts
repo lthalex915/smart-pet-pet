@@ -5,6 +5,9 @@ export interface SensorData {
   temperature: number | null;
   humidity: number | null;
   weight: number | null;
+  foodConsumedLastG?: number;
+  foodConsumedTotalG?: number;
+  waterPumpIntervalMin?: number;
   hasFood: boolean;
   fanSpeed?: number;
   fanManualOn?: boolean;
@@ -32,6 +35,7 @@ export interface FeedingSettings {
   scheduleTimes: string[];
   motorRunMs: number;
   weightDeltaThresholdG: number;
+  waterPumpIntervalMin: number;
   confirmationTimeoutMs: number;
   retryDelayMs: number;
   maxAttempts: number;

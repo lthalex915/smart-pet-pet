@@ -144,10 +144,17 @@ const bool FEED_PUMP_WITH_MOTOR = false; // Keep false for food-only dispenser
 const int FEED_RUN_MS_DEFAULT = 1000;
 const int FEED_RUN_MS_MIN     = 300;
 const int FEED_RUN_MS_MAX     = 5000;
+const int WATER_PUMP_RUN_MS_DEFAULT = 1500;
+const int WATER_PUMP_INTERVAL_DEFAULT_MIN = 20;
 
 int  feederMotorSpeed = 0;   // -100..100
 bool feederPumpOn = false;
 char lastFeedingRequestId[48] = "";
+int  waterPumpIntervalMin = WATER_PUMP_INTERVAL_DEFAULT_MIN;
+unsigned long waterPumpIntervalMs = (unsigned long)WATER_PUMP_INTERVAL_DEFAULT_MIN * 60UL * 1000UL;
+bool waterPumpCycleActive = false;
+unsigned long waterPumpCycleStartedAt = 0;
+unsigned long lastWaterPumpCycleAt = 0;
 
 // ── OLED Config ────────────────────────────────────────────
 #define OLED_W      128
@@ -176,6 +183,8 @@ bool  noEcho              = true;
 float foodWeightGram      = NAN;
 bool  loadCellOK          = false;
 bool  hasFoodInContainer  = false;
+float foodConsumedLastGram = 0.0;
+float foodConsumedTotalGram = 0.0;
 
 // ── RFID State ─────────────────────────────────────────────
 char               rfidUID[30]  = "";
@@ -207,14 +216,17 @@ struct __attribute__((packed)) OfflineSample {
   int16_t  tempDeciC;
   int16_t  humidityDeciPct;
   int32_t  weightDeciG;
+  int32_t  foodConsumedLastDeciG;
+  int32_t  foodConsumedTotalDeciG;
   int16_t  fanAutoThresholdDeciC;
   uint8_t  flags;
   uint8_t  fanSpeedPct;
   uint8_t  fanManualPct;
+  uint8_t  waterPumpIntervalMin;
 };
 
 const uint16_t EEPROM_QUEUE_MAGIC   = 0xA55A;
-const uint8_t  EEPROM_QUEUE_VERSION = 1;
+const uint8_t  EEPROM_QUEUE_VERSION = 2;
 const uint8_t  OFFLINE_SAMPLE_MARKER = 0xA5;
 
 const uint8_t OFFLINE_FLAG_NO_ECHO           = 0x01;
@@ -247,6 +259,7 @@ unsigned long lastWeightTime   = 0;
 unsigned long lastFirebasePush = 0;
 unsigned long lastFanControlPull = 0;
 unsigned long lastFeedingControlPull = 0;
+unsigned long lastFeedingSettingsPull = 0;
 unsigned long lastOfflineStoreTime = 0;
 unsigned long lastOfflineFlushTime = 0;
 unsigned long lastReconnectAttempt = 0;
@@ -260,6 +273,9 @@ float         lastPushedWeight = NAN;
 int           lastPushedFanSpeed = -1;
 int           lastPushedFanManualPercent = -1;
 float         lastPushedFanAutoThresholdC = NAN;
+float         lastPushedFoodConsumedLast = NAN;
+float         lastPushedFoodConsumedTotal = NAN;
+int           lastPushedWaterPumpIntervalMin = -1;
 bool          lastPushedNoEcho = true;
 bool          lastPushedHasFood = false;
 bool          lastPushedFanManualOn = false;
@@ -286,6 +302,7 @@ const unsigned long WEIGHT_INTERVAL               = 1500;
 const unsigned long FIREBASE_SENSOR_INTERVAL      = 15000;
 const unsigned long FIREBASE_FAN_CONTROL_INTERVAL = 20000;
 const unsigned long FIREBASE_FEEDING_CONTROL_INTERVAL = 5000;
+const unsigned long FIREBASE_FEEDING_SETTINGS_INTERVAL = 30000;
 const unsigned long OFFLINE_STORE_INTERVAL         = 600000;
 const unsigned long OFFLINE_FLUSH_INTERVAL         = 2000;
 const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
@@ -297,17 +314,21 @@ const float TEMP_CHANGE_THRESHOLD          = 0.5f;
 const float HUMID_CHANGE_THRESHOLD         = 2.0f;
 const float WEIGHT_CHANGE_THRESHOLD        = 5.0f;
 const float FAN_THRESHOLD_CHANGE_THRESHOLD = 0.2f;
+const float FOOD_CONSUMED_CHANGE_THRESHOLD = 0.1f;
+const float FOOD_CONSUMED_MIN_DELTA_G      = 0.2f;
 
 // Forward declarations used before concrete definitions.
 void configureESP8266SSL();
 void configureESP8266PowerSave();
 bool firebasePullFanSettings();
 bool firebasePullFeedingCommand();
+bool firebasePullFeedingSettings();
 bool firebasePushSensorLatest(bool forcePush = false);
 String firebaseAuthQuery();
 bool espHttpJsonRequest(const char* method, const String& path, const String& payload,
                         String* responseOut = NULL);
 bool isSignedIntegerString(const String& input);
+int sanitizeWaterPumpIntervalMin(int value);
 void setFeederMotorSpeed(int speedPercent);
 void setFeederPump(bool on);
 bool runFeederDispenseOnce(int motorRunMs);
@@ -316,6 +337,7 @@ void updateLastPushedSnapshot();
 void firebaseServiceWindow(unsigned long now);
 void readDistanceSmart();
 void checkOledDimming(unsigned long now);
+void serviceWaterPumpAuto(unsigned long now);
 
 
 // ═══════════════════════════════════════════════════════════
@@ -360,6 +382,9 @@ void updateLastPushedSnapshot() {
   lastPushedFanSpeed = fanSpeed;
   lastPushedFanManualPercent = fanManualPercent;
   lastPushedFanAutoThresholdC = fanAutoThresholdC;
+  lastPushedFoodConsumedLast = foodConsumedLastGram;
+  lastPushedFoodConsumedTotal = foodConsumedTotalGram;
+  lastPushedWaterPumpIntervalMin = waterPumpIntervalMin;
   lastPushedNoEcho = noEcho;
   lastPushedHasFood = hasFoodInContainer;
   lastPushedFanManualOn = fanManualOn;
@@ -380,12 +405,15 @@ bool sensorDataChangedSignificantly() {
   if (lastPushedFanAutoTriggered != fanAutoTriggered) return true;
   if (lastPushedFanSpeed != fanSpeed) return true;
   if (lastPushedFanManualPercent != fanManualPercent) return true;
+  if (lastPushedWaterPumpIntervalMin != waterPumpIntervalMin) return true;
 
   if (floatChangedBeyondThreshold(lastDistance, lastPushedDistance, DIST_CHANGE_THRESHOLD)) return true;
   if (floatChangedBeyondThreshold(dhtTemp, lastPushedTemp, TEMP_CHANGE_THRESHOLD)) return true;
   if (floatChangedBeyondThreshold(dhtHumidity, lastPushedHumidity, HUMID_CHANGE_THRESHOLD)) return true;
   if (floatChangedBeyondThreshold(foodWeightGram, lastPushedWeight, WEIGHT_CHANGE_THRESHOLD)) return true;
   if (floatChangedBeyondThreshold(fanAutoThresholdC, lastPushedFanAutoThresholdC, FAN_THRESHOLD_CHANGE_THRESHOLD)) return true;
+  if (floatChangedBeyondThreshold(foodConsumedLastGram, lastPushedFoodConsumedLast, FOOD_CONSUMED_CHANGE_THRESHOLD)) return true;
+  if (floatChangedBeyondThreshold(foodConsumedTotalGram, lastPushedFoodConsumedTotal, FOOD_CONSUMED_CHANGE_THRESHOLD)) return true;
 
   return false;
 }
@@ -591,6 +619,9 @@ OfflineSample buildCurrentOfflineSample(unsigned long now) {
     sample.weightDeciG = floatToDeciInt32(foodWeightGram);
   }
 
+  sample.foodConsumedLastDeciG = floatToDeciInt32(foodConsumedLastGram);
+  sample.foodConsumedTotalDeciG = floatToDeciInt32(foodConsumedTotalGram);
+
   if (hasFoodInContainer) sample.flags |= OFFLINE_FLAG_HAS_FOOD;
   if (fanManualOn) sample.flags |= OFFLINE_FLAG_FAN_MANUAL_ON;
   if (fanAutoEnabled) sample.flags |= OFFLINE_FLAG_FAN_AUTO_ENABLED;
@@ -599,6 +630,7 @@ OfflineSample buildCurrentOfflineSample(unsigned long now) {
   sample.fanSpeedPct = (uint8_t)constrain(fanSpeed, 0, 100);
   sample.fanManualPct = (uint8_t)constrain(fanManualPercent, 0, 100);
   sample.fanAutoThresholdDeciC = floatToDeciInt16(fanAutoThresholdC);
+  sample.waterPumpIntervalMin = (uint8_t)sanitizeWaterPumpIntervalMin(waterPumpIntervalMin);
 
   return sample;
 }
@@ -629,6 +661,18 @@ String buildOfflineSamplePayload(const OfflineSample& sample) {
   payload += "\"weight\":";
   if (sample.flags & OFFLINE_FLAG_WEIGHT_VALID) payload += String(deciInt32ToFloat(sample.weightDeciG), 1);
   else payload += "null";
+  payload += ",";
+
+  payload += "\"foodConsumedLastG\":";
+  payload += String(deciInt32ToFloat(sample.foodConsumedLastDeciG), 1);
+  payload += ",";
+
+  payload += "\"foodConsumedTotalG\":";
+  payload += String(deciInt32ToFloat(sample.foodConsumedTotalDeciG), 1);
+  payload += ",";
+
+  payload += "\"waterPumpIntervalMin\":";
+  payload += String((int)sample.waterPumpIntervalMin);
   payload += ",";
 
   payload += "\"hasFood\":";
@@ -1000,6 +1044,8 @@ void attemptWiFiReconnect(unsigned long now) {
   configureESP8266PowerSave();
   firebasePullFanSettings();
   lastFanControlPull = now;
+  firebasePullFeedingSettings();
+  lastFeedingSettingsPull = now;
   firebasePullFeedingCommand();
   lastFeedingControlPull = now;
   firebasePushSensorLatest(true);
@@ -1429,6 +1475,17 @@ bool isSignedIntegerString(const String& input) {
   return true;
 }
 
+int sanitizeWaterPumpIntervalMin(int value) {
+  int rounded = (int)(value / 5) * 5;
+  if (value % 5 >= 3) {
+    rounded += 5;
+  }
+
+  if (rounded < 15) return 15;
+  if (rounded > 30) return 30;
+  return rounded;
+}
+
 bool firebasePullFanSettings() {
   const char* settingsPaths[] = {
     "/sensors/fanSettings.json",  // preferred shared path
@@ -1651,6 +1708,61 @@ bool firebasePullFeedingCommand() {
   return true;
 }
 
+bool firebasePullFeedingSettings() {
+  String response;
+  String path = "/sensors/feeding/settings.json";
+  path += firebaseAuthQuery();
+
+  if (!espHttpJsonRequest("GET", path, "", &response)) {
+    Serial.println(F("[WATER WARN] feeding/settings fetch failed."));
+    return false;
+  }
+
+  String body;
+  if (!extractHttpBody(response, &body)) {
+    Serial.println(F("[WATER WARN] feeding/settings response has no body."));
+    return false;
+  }
+
+  if (body.length() == 0 || body == "null") {
+    return false;
+  }
+
+  int nextInterval = waterPumpIntervalMin;
+  bool parsed = false;
+  float floatValue;
+
+  if (jsonReadFloat(body, "waterPumpIntervalMin", &floatValue)) {
+    nextInterval = (int)(floatValue + (floatValue >= 0 ? 0.5f : -0.5f));
+    parsed = true;
+  } else {
+    String intervalText;
+    if (jsonReadString(body, "waterPumpIntervalMin", &intervalText)) {
+      intervalText.trim();
+      if (isSignedIntegerString(intervalText)) {
+        nextInterval = intervalText.toInt();
+        parsed = true;
+      }
+    }
+  }
+
+  if (!parsed) {
+    return false;
+  }
+
+  nextInterval = sanitizeWaterPumpIntervalMin(nextInterval);
+  if (waterPumpIntervalMin != nextInterval) {
+    waterPumpIntervalMin = nextInterval;
+    waterPumpIntervalMs = (unsigned long)waterPumpIntervalMin * 60UL * 1000UL;
+
+    Serial.print(F("[WATER] Pump interval updated to "));
+    Serial.print(waterPumpIntervalMin);
+    Serial.println(F(" min"));
+  }
+
+  return true;
+}
+
 bool firebasePushSensorLatest(bool forcePush) {
   if (!forcePush && !sensorDataChangedSignificantly()) {
     Serial.println(F("[FB] sensors/latest unchanged, push skipped."));
@@ -1683,7 +1795,7 @@ bool firebasePushSensorLatest(bool forcePush) {
 
   writeFloatText(thresholdBuf, sizeof(thresholdBuf), fanAutoThresholdC, 1);
 
-  char payload[512];
+  char payload[640];
   snprintf(payload, sizeof(payload),
            "{"
            "\"id\":\"%s\","
@@ -1699,6 +1811,9 @@ bool firebasePushSensorLatest(bool forcePush) {
            "\"fae\":%s,"
            "\"fat\":%s,"
            "\"ftr\":%s,"
+           "\"fcl\":%.1f,"
+           "\"fct\":%.1f,"
+           "\"wpi\":%d,"
            "\"ts\":{\".sv\":\"timestamp\"}"
            "}",
            DEVICE_ID,
@@ -1713,7 +1828,10 @@ bool firebasePushSensorLatest(bool forcePush) {
            fanManualPercent,
            fanAutoEnabled ? "true" : "false",
            thresholdBuf,
-           fanAutoTriggered ? "true" : "false");
+           fanAutoTriggered ? "true" : "false",
+           foodConsumedLastGram,
+           foodConsumedTotalGram,
+           waterPumpIntervalMin);
 
   String path = "/sensors/latest.json";
   path += firebaseAuthQuery();
@@ -1998,16 +2116,48 @@ void checkOledDimming(unsigned long now) {
   }
 }
 
+void serviceWaterPumpAuto(unsigned long now) {
+  if (waterPumpCycleActive) {
+    if (now - waterPumpCycleStartedAt >= (unsigned long)WATER_PUMP_RUN_MS_DEFAULT) {
+      setFeederPump(false);
+      waterPumpCycleActive = false;
+      lastWaterPumpCycleAt = now;
+      Serial.println(F("[WATER] Auto cycle completed."));
+      firebasePushSensorLatest(true);
+    }
+    return;
+  }
+
+  if (waterPumpIntervalMs == 0) {
+    return;
+  }
+
+  if (lastWaterPumpCycleAt == 0) {
+    lastWaterPumpCycleAt = now;
+    return;
+  }
+
+  if (now - lastWaterPumpCycleAt >= waterPumpIntervalMs) {
+    setFeederPump(true);
+    waterPumpCycleActive = true;
+    waterPumpCycleStartedAt = now;
+    Serial.print(F("[WATER] Auto cycle started for "));
+    Serial.print(WATER_PUMP_RUN_MS_DEFAULT);
+    Serial.println(F(" ms."));
+  }
+}
+
 void firebaseServiceWindow(unsigned long now) {
   if (!wifiConnected) {
     return;
   }
 
   bool dueFan = (now - lastFanControlPull >= FIREBASE_FAN_CONTROL_INTERVAL);
+  bool dueFeedSettings = (now - lastFeedingSettingsPull >= FIREBASE_FEEDING_SETTINGS_INTERVAL);
   bool dueFeed = (now - lastFeedingControlPull >= FIREBASE_FEEDING_CONTROL_INTERVAL);
   bool duePush = (now - lastFirebasePush >= FIREBASE_SENSOR_INTERVAL);
 
-  if (!dueFan && !dueFeed && !duePush) {
+  if (!dueFan && !dueFeedSettings && !dueFeed && !duePush) {
     return;
   }
 
@@ -2019,6 +2169,11 @@ void firebaseServiceWindow(unsigned long now) {
   if (dueFan) {
     lastFanControlPull = now;
     firebasePullFanSettings();
+  }
+
+  if (dueFeedSettings) {
+    lastFeedingSettingsPull = now;
+    firebasePullFeedingSettings();
   }
 
   if (dueFeed) {
@@ -2065,6 +2220,7 @@ void readFoodWeight() {
 
   if (!scale.is_ready()) {
     foodWeightGram = NAN;
+    foodConsumedLastGram = 0.0f;
     hasFoodInContainer = false;
     Serial.println(F("[HX711] Not ready — check wiring."));
     return;
@@ -2072,12 +2228,32 @@ void readFoodWeight() {
 
   float rawWeight = scale.get_units(10);
 
-  // Clamp tiny negative noise values to zero.
-  if (rawWeight < 0 && rawWeight > -2.0) {
-    rawWeight = 0.0;
+  // Weight cannot be negative.
+  if (rawWeight < 0.0f) {
+    rawWeight = 0.0f;
   }
 
+  float lastValidWeight = (isFiniteFloat(foodWeightGram) ? foodWeightGram : NAN);
   foodWeightGram = rawWeight;
+
+  float consumed = 0.0f;
+  if (isFiniteFloat(lastValidWeight)) {
+    float delta = lastValidWeight - foodWeightGram;
+    if (delta >= FOOD_CONSUMED_MIN_DELTA_G) {
+      consumed = delta;
+      foodConsumedTotalGram += consumed;
+      if (foodConsumedTotalGram < 0.0f) {
+        foodConsumedTotalGram = 0.0f;
+      }
+      Serial.print(F("[HX711] Food consumed: "));
+      Serial.print(consumed, 1);
+      Serial.print(F(" g | Total: "));
+      Serial.print(foodConsumedTotalGram, 1);
+      Serial.println(F(" g"));
+    }
+  }
+
+  foodConsumedLastGram = consumed;
   hasFoodInContainer = foodWeightGram >= FOOD_PRESENT_THRESHOLD_G;
 
   Serial.print(F("[HX711] Weight: "));
@@ -2255,10 +2431,13 @@ void setup() {
     configureESP8266PowerSave();
   }
 
-  // Pull fan settings + first sensor sync right after WiFi comes up
+  // Pull fan/feeding settings + first sensor sync right after WiFi comes up
   if (wifiConnected) {
     firebasePullFanSettings();
     lastFanControlPull = millis();
+
+    firebasePullFeedingSettings();
+    lastFeedingSettingsPull = millis();
 
     firebasePullFeedingCommand();
     lastFeedingControlPull = millis();
@@ -2279,7 +2458,9 @@ void setup() {
 
   lastDHTTime = millis();
   lastWeightTime = millis();
+  lastWaterPumpCycleAt = millis();
   lastFeedingControlPull = millis();
+  lastFeedingSettingsPull = millis();
   lastOfflineStoreTime = millis();
   lastOfflineFlushTime = millis();
   lastReconnectAttempt = millis();
@@ -2345,6 +2526,9 @@ void loop() {
 
   // ── Combined Firebase service window ────────────────────
   firebaseServiceWindow(now);
+
+  // ── Water pump periodic auto-cycle ──────────────────────
+  serviceWaterPumpAuto(now);
 
   // ── Buffer sensors to EEPROM every 5 min while offline ─
   storeOfflineSampleIfDue(now);
