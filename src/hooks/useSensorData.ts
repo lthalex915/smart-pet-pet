@@ -11,19 +11,41 @@ import {
   userSensorsLatestPath,
 } from '../constants/dbPaths';
 
+type RawSensorData = Partial<SensorData> & {
+  id?: unknown;
+  d?: unknown;
+  n?: unknown;
+  t?: unknown;
+  h?: unknown;
+  w?: unknown;
+  hf?: unknown;
+  f?: unknown;
+  fmo?: unknown;
+  fmp?: unknown;
+  fae?: unknown;
+  fat?: unknown;
+  ftr?: unknown;
+  ts?: unknown;
+};
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asBooleanOrNull(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
 function toTrendPoint(snapshot: DataSnapshot): SensorTrendPoint {
-  const value = snapshot.val() as Partial<SensorData> | null;
+  const value = snapshot.val() as RawSensorData | null;
+  const temperature = asFiniteNumber(value?.temperature) ?? asFiniteNumber(value?.t);
+  const humidity = asFiniteNumber(value?.humidity) ?? asFiniteNumber(value?.h);
+  const timestamp = asFiniteNumber(value?.timestamp) ?? asFiniteNumber(value?.ts) ?? 0;
 
   return {
-    timestamp: Number(value?.timestamp ?? 0),
-    temperature:
-      typeof value?.temperature === 'number' && Number.isFinite(value.temperature)
-        ? value.temperature
-        : null,
-    humidity:
-      typeof value?.humidity === 'number' && Number.isFinite(value.humidity)
-        ? value.humidity
-        : null,
+    timestamp,
+    temperature,
+    humidity,
   };
 }
 
@@ -32,21 +54,37 @@ function normalizeSensorData(value: SensorData | null): SensorData | null {
     return null;
   }
 
+  const raw = value as RawSensorData;
+
+  const distance = asFiniteNumber(raw.distance) ?? asFiniteNumber(raw.d);
+  const noEcho = asBooleanOrNull(raw.noEcho) ?? asBooleanOrNull(raw.n) ?? false;
+  const temperature = asFiniteNumber(raw.temperature) ?? asFiniteNumber(raw.t);
+  const humidity = asFiniteNumber(raw.humidity) ?? asFiniteNumber(raw.h);
+  const weight = asFiniteNumber(raw.weight) ?? asFiniteNumber(raw.w);
+  const hasFood = asBooleanOrNull(raw.hasFood) ?? asBooleanOrNull(raw.hf) ?? false;
+  const fanSpeed = asFiniteNumber(raw.fanSpeed) ?? asFiniteNumber(raw.f);
+  const fanManualOn = asBooleanOrNull(raw.fanManualOn) ?? asBooleanOrNull(raw.fmo);
+  const fanManualPercent = asFiniteNumber(raw.fanManualPercent) ?? asFiniteNumber(raw.fmp);
+  const fanAutoEnabled = asBooleanOrNull(raw.fanAutoEnabled) ?? asBooleanOrNull(raw.fae);
+  const fanAutoThresholdC = asFiniteNumber(raw.fanAutoThresholdC) ?? asFiniteNumber(raw.fat);
+  const fanAutoTriggered = asBooleanOrNull(raw.fanAutoTriggered) ?? asBooleanOrNull(raw.ftr);
+  const timestamp = asFiniteNumber(raw.timestamp) ?? asFiniteNumber(raw.ts) ?? 0;
+
   return {
-    deviceId: value.deviceId ?? 'unknown',
-    distance: value.distance ?? null,
-    noEcho: Boolean(value.noEcho),
-    temperature: typeof value.temperature === 'number' ? value.temperature : null,
-    humidity: typeof value.humidity === 'number' ? value.humidity : null,
-    weight: typeof value.weight === 'number' ? value.weight : null,
-    hasFood: Boolean(value.hasFood),
-    fanSpeed: typeof value.fanSpeed === 'number' ? value.fanSpeed : undefined,
-    fanManualOn: typeof value.fanManualOn === 'boolean' ? value.fanManualOn : undefined,
-    fanManualPercent: typeof value.fanManualPercent === 'number' ? value.fanManualPercent : undefined,
-    fanAutoEnabled: typeof value.fanAutoEnabled === 'boolean' ? value.fanAutoEnabled : undefined,
-    fanAutoThresholdC: typeof value.fanAutoThresholdC === 'number' ? value.fanAutoThresholdC : undefined,
-    fanAutoTriggered: typeof value.fanAutoTriggered === 'boolean' ? value.fanAutoTriggered : undefined,
-    timestamp: Number(value.timestamp ?? 0),
+    deviceId: typeof raw.deviceId === 'string' ? raw.deviceId : typeof raw.id === 'string' ? raw.id : 'unknown',
+    distance,
+    noEcho,
+    temperature,
+    humidity,
+    weight,
+    hasFood,
+    fanSpeed: fanSpeed ?? undefined,
+    fanManualOn: fanManualOn ?? undefined,
+    fanManualPercent: fanManualPercent ?? undefined,
+    fanAutoEnabled: fanAutoEnabled ?? undefined,
+    fanAutoThresholdC: fanAutoThresholdC ?? undefined,
+    fanAutoTriggered: fanAutoTriggered ?? undefined,
+    timestamp,
   };
 }
 

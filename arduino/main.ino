@@ -90,6 +90,8 @@
 #include <HX711.h>
 #include <EEPROM.h>
 #include <limits.h>
+#include <math.h>
+#include <avr/wdt.h>
 
 // ── Wi-Fi Credentials ──────────────────────────────────────
 #define WIFI_SSID  "EE3070_P1615_1"
@@ -251,7 +253,32 @@ unsigned long lastReconnectAttempt = 0;
 bool          blinkState       = true;
 bool          previousWifiConnected = false;
 
+float         lastPushedDistance = NAN;
+float         lastPushedTemp = NAN;
+float         lastPushedHumidity = NAN;
+float         lastPushedWeight = NAN;
+int           lastPushedFanSpeed = -1;
+int           lastPushedFanManualPercent = -1;
+float         lastPushedFanAutoThresholdC = NAN;
+bool          lastPushedNoEcho = true;
+bool          lastPushedHasFood = false;
+bool          lastPushedFanManualOn = false;
+bool          lastPushedFanAutoEnabled = false;
+bool          lastPushedFanAutoTriggered = false;
+bool          lastPushedSnapshotValid = false;
+
+unsigned long currentDistanceInterval = 300;
+float         adaptiveDistancePrev = NAN;
+bool          adaptiveDistancePrevNoEcho = true;
+
+unsigned long lastActivityTime = 0;
+bool          oledDimmed = false;
+
+bool          espPowerSaveConfigured = false;
+bool          espPowerSaveSupported = false;
+
 const unsigned long DISTANCE_INTERVAL             = 300;
+const unsigned long DISTANCE_IDLE_INTERVAL        = 1000;
 const unsigned long OLED_INTERVAL                 = 150;
 const unsigned long BLINK_INTERVAL                = 500;
 const unsigned long DHT_INTERVAL                  = 3000;
@@ -262,12 +289,21 @@ const unsigned long FIREBASE_FEEDING_CONTROL_INTERVAL = 5000;
 const unsigned long OFFLINE_STORE_INTERVAL         = 600000;
 const unsigned long OFFLINE_FLUSH_INTERVAL         = 2000;
 const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
+const unsigned long OLED_DIM_TIMEOUT               = 60000;
+
+const float DIST_SIGNIFICANT_CHANGE       = 5.0f;
+const float DIST_CHANGE_THRESHOLD          = 2.0f;
+const float TEMP_CHANGE_THRESHOLD          = 0.5f;
+const float HUMID_CHANGE_THRESHOLD         = 2.0f;
+const float WEIGHT_CHANGE_THRESHOLD        = 5.0f;
+const float FAN_THRESHOLD_CHANGE_THRESHOLD = 0.2f;
 
 // Forward declarations used before concrete definitions.
 void configureESP8266SSL();
+void configureESP8266PowerSave();
 bool firebasePullFanSettings();
 bool firebasePullFeedingCommand();
-void firebasePushSensorLatest();
+bool firebasePushSensorLatest(bool forcePush = false);
 String firebaseAuthQuery();
 bool espHttpJsonRequest(const char* method, const String& path, const String& payload,
                         String* responseOut = NULL);
@@ -275,6 +311,11 @@ bool isSignedIntegerString(const String& input);
 void setFeederMotorSpeed(int speedPercent);
 void setFeederPump(bool on);
 bool runFeederDispenseOnce(int motorRunMs);
+bool sensorDataChangedSignificantly();
+void updateLastPushedSnapshot();
+void firebaseServiceWindow(unsigned long now);
+void readDistanceSmart();
+void checkOledDimming(unsigned long now);
 
 
 // ═══════════════════════════════════════════════════════════
@@ -283,6 +324,70 @@ bool runFeederDispenseOnce(int motorRunMs);
 
 bool isFiniteFloat(float value) {
   return !isnan(value) && !isinf(value);
+}
+
+void writeFloatText(char* out, size_t outSize, float value, uint8_t decimals) {
+  if (!out || outSize == 0) {
+    return;
+  }
+
+  if (!isFiniteFloat(value)) {
+    strncpy(out, "null", outSize - 1);
+    out[outSize - 1] = '\0';
+    return;
+  }
+
+  dtostrf(value, 0, decimals, out);
+}
+
+bool floatChangedBeyondThreshold(float current, float previous, float threshold) {
+  if (!isFiniteFloat(current) && !isFiniteFloat(previous)) {
+    return false;
+  }
+
+  if (!isFiniteFloat(current) || !isFiniteFloat(previous)) {
+    return true;
+  }
+
+  return fabsf(current - previous) > threshold;
+}
+
+void updateLastPushedSnapshot() {
+  lastPushedDistance = lastDistance;
+  lastPushedTemp = dhtTemp;
+  lastPushedHumidity = dhtHumidity;
+  lastPushedWeight = foodWeightGram;
+  lastPushedFanSpeed = fanSpeed;
+  lastPushedFanManualPercent = fanManualPercent;
+  lastPushedFanAutoThresholdC = fanAutoThresholdC;
+  lastPushedNoEcho = noEcho;
+  lastPushedHasFood = hasFoodInContainer;
+  lastPushedFanManualOn = fanManualOn;
+  lastPushedFanAutoEnabled = fanAutoEnabled;
+  lastPushedFanAutoTriggered = fanAutoTriggered;
+  lastPushedSnapshotValid = true;
+}
+
+bool sensorDataChangedSignificantly() {
+  if (!lastPushedSnapshotValid) {
+    return true;
+  }
+
+  if (lastPushedNoEcho != noEcho) return true;
+  if (lastPushedHasFood != hasFoodInContainer) return true;
+  if (lastPushedFanManualOn != fanManualOn) return true;
+  if (lastPushedFanAutoEnabled != fanAutoEnabled) return true;
+  if (lastPushedFanAutoTriggered != fanAutoTriggered) return true;
+  if (lastPushedFanSpeed != fanSpeed) return true;
+  if (lastPushedFanManualPercent != fanManualPercent) return true;
+
+  if (floatChangedBeyondThreshold(lastDistance, lastPushedDistance, DIST_CHANGE_THRESHOLD)) return true;
+  if (floatChangedBeyondThreshold(dhtTemp, lastPushedTemp, TEMP_CHANGE_THRESHOLD)) return true;
+  if (floatChangedBeyondThreshold(dhtHumidity, lastPushedHumidity, HUMID_CHANGE_THRESHOLD)) return true;
+  if (floatChangedBeyondThreshold(foodWeightGram, lastPushedWeight, WEIGHT_CHANGE_THRESHOLD)) return true;
+  if (floatChangedBeyondThreshold(fanAutoThresholdC, lastPushedFanAutoThresholdC, FAN_THRESHOLD_CHANGE_THRESHOLD)) return true;
+
+  return false;
 }
 
 int16_t floatToDeciInt16(float value) {
@@ -800,7 +905,11 @@ bool runFeederDispenseOnce(int motorRunMs) {
     setFeederPump(true);
   }
 
-  delay(safeRunMs);
+  unsigned long startedAt = millis();
+  while (millis() - startedAt < (unsigned long)safeRunMs) {
+    wdt_reset();
+    delay(50);
+  }
 
   setFeederMotorSpeed(0);
   if (FEED_PUMP_WITH_MOTOR) {
@@ -825,6 +934,7 @@ bool espSendCmd(const char* cmd, const char* expected,
   String resp = "";
   unsigned long start = millis();
   while (millis() - start < timeoutMs) {
+    wdt_reset();
     while (ESP_SERIAL.available()) resp += (char)ESP_SERIAL.read();
     if (resp.indexOf(expected) != -1) {
       Serial.print(F("[ESP] << ")); Serial.println(resp);
@@ -838,6 +948,8 @@ bool espSendCmd(const char* cmd, const char* expected,
 void initESP8266() {
   Serial.println(F("[ESP] Initialising ESP8266..."));
   wifiConnected = false;
+  espPowerSaveConfigured = false;
+  espPowerSaveSupported = false;
   ESP_SERIAL.begin(ESP_BAUD);
   delay(1500);
   while (ESP_SERIAL.available()) ESP_SERIAL.read();
@@ -885,11 +997,12 @@ void attemptWiFiReconnect(unsigned long now) {
   }
 
   configureESP8266SSL();
+  configureESP8266PowerSave();
   firebasePullFanSettings();
   lastFanControlPull = now;
   firebasePullFeedingCommand();
   lastFeedingControlPull = now;
-  firebasePushSensorLatest();
+  firebasePushSensorLatest(true);
   lastFirebasePush = now;
   lastOfflineFlushTime = 0;
 
@@ -912,6 +1025,27 @@ void configureESP8266SSL() {
     Serial.println(F("[ESP WARN] CIPSSLSIZE unsupported (continuing)."));
 }
 
+void configureESP8266PowerSave() {
+  if (!wifiConnected) {
+    return;
+  }
+
+  if (espPowerSaveConfigured) {
+    return;
+  }
+
+  Serial.println(F("[ESP] Enabling modem sleep (battery save)..."));
+  if (espSendCmd("AT+SLEEP=2", "OK", 3000) || espSendCmd("AT+SLEEP=1", "OK", 3000)) {
+    espPowerSaveSupported = true;
+    Serial.println(F("[ESP PASS] Modem sleep enabled."));
+  } else {
+    espPowerSaveSupported = false;
+    Serial.println(F("[ESP WARN] Modem sleep unsupported on this AT firmware."));
+  }
+
+  espPowerSaveConfigured = true;
+}
+
 
 // ═══════════════════════════════════════════════════════════
 //  Firebase REST Push Helpers (via ESP8266 AT)
@@ -922,6 +1056,7 @@ bool espWaitForToken(const char* expected, unsigned long timeoutMs, String* resp
   unsigned long start = millis();
 
   while (millis() - start < timeoutMs) {
+    wdt_reset();
     while (ESP_SERIAL.available()) {
       resp += (char)ESP_SERIAL.read();
       if (resp.indexOf(expected) != -1) {
@@ -953,6 +1088,7 @@ bool espTryOpenSSLSocket(const char* target, String* responseOut) {
   bool connected = false;
 
   while (millis() - start < 15000) {
+    wdt_reset();
     while (ESP_SERIAL.available()) {
       resp += (char)ESP_SERIAL.read();
     }
@@ -1072,6 +1208,7 @@ bool espHttpJsonRequest(const char* method, const String& path, const String& pa
   // Read remaining HTTP response. Extend timeout while bytes continue to arrive.
   unsigned long readStart = millis();
   while (millis() - readStart < 7000) {
+    wdt_reset();
     while (ESP_SERIAL.available()) {
       resp += (char)ESP_SERIAL.read();
       readStart = millis();
@@ -1397,27 +1534,26 @@ bool firebasePatchFeedingCommandStatus(const char* status,
                                        bool executed,
                                        int appliedMotorRunMs,
                                        const char* note) {
-  String payload = "{";
-  payload += "\"status\":\"";
-  payload += status;
-  payload += "\",";
-  payload += "\"executed\":";
-  payload += (executed ? "true" : "false");
-  payload += ",";
-  payload += "\"processedBy\":\"" DEVICE_ID "\",";
-  payload += "\"processedAt\":{\".sv\":\"timestamp\"},";
-  payload += "\"appliedMotorRunMs\":";
-  payload += String(appliedMotorRunMs);
-  payload += ",";
-  payload += "\"note\":\"";
-  payload += note;
-  payload += "\"";
-  payload += "}";
+  char payload[320];
+  snprintf(payload, sizeof(payload),
+           "{"
+           "\"status\":\"%s\"," 
+           "\"executed\":%s,"
+           "\"processedBy\":\"%s\","
+           "\"processedAt\":{\".sv\":\"timestamp\"},"
+           "\"appliedMotorRunMs\":%d,"
+           "\"note\":\"%s\""
+           "}",
+           status,
+           executed ? "true" : "false",
+           DEVICE_ID,
+           appliedMotorRunMs,
+           note);
 
   String path = "/sensors/feeding/command.json";
   path += firebaseAuthQuery();
 
-  return espHttpJsonRequest("PATCH", path, payload);
+  return espHttpJsonRequest("PATCH", path, String(payload));
 }
 
 bool firebasePullFeedingCommand() {
@@ -1511,62 +1647,85 @@ bool firebasePullFeedingCommand() {
     Serial.println(F("[FEED WARN] Failed to patch feeding command status."));
   }
 
-  firebasePushSensorLatest();
+  firebasePushSensorLatest(true);
   return true;
 }
 
-void firebasePushSensorLatest() {
-  String payload = "{";
-  payload += "\"deviceId\":\"" DEVICE_ID "\",";
-  payload += "\"distance\":";
-  if (noEcho || lastDistance < 0) payload += "null";
-  else                            payload += String(lastDistance, 1);
-  payload += ",";
-  payload += "\"noEcho\":";
-  payload += (noEcho ? "true" : "false");
-  payload += ",";
-  payload += "\"temperature\":";
-  if (!dhtOK || isnan(dhtTemp))   payload += "null";
-  else                            payload += String(dhtTemp, 1);
-  payload += ",";
-  payload += "\"humidity\":";
-  if (!dhtOK || isnan(dhtHumidity)) payload += "null";
-  else                              payload += String(dhtHumidity, 0);
-  payload += ",";
-  payload += "\"weight\":";
-  if (!loadCellOK || isnan(foodWeightGram)) payload += "null";
-  else                                       payload += String(foodWeightGram, 1);
-  payload += ",";
-  payload += "\"hasFood\":";
-  payload += (hasFoodInContainer ? "true" : "false");
-  payload += ",";
-  payload += "\"fanSpeed\":";
-  payload += String(fanSpeed);
-  payload += ",";
-  payload += "\"fanManualOn\":";
-  payload += (fanManualOn ? "true" : "false");
-  payload += ",";
-  payload += "\"fanManualPercent\":";
-  payload += String(fanManualPercent);
-  payload += ",";
-  payload += "\"fanAutoEnabled\":";
-  payload += (fanAutoEnabled ? "true" : "false");
-  payload += ",";
-  payload += "\"fanAutoThresholdC\":";
-  payload += String(fanAutoThresholdC, 1);
-  payload += ",";
-  payload += "\"fanAutoTriggered\":";
-  payload += (fanAutoTriggered ? "true" : "false");
-  payload += ",";
-  payload += "\"timestamp\":{\".sv\":\"timestamp\"}";
-  payload += "}";
+bool firebasePushSensorLatest(bool forcePush) {
+  if (!forcePush && !sensorDataChangedSignificantly()) {
+    Serial.println(F("[FB] sensors/latest unchanged, push skipped."));
+    return true;
+  }
+
+  char distanceBuf[16];
+  char tempBuf[16];
+  char humidityBuf[16];
+  char weightBuf[16];
+  char thresholdBuf[16];
+
+  if (noEcho || lastDistance < 0) strncpy(distanceBuf, "null", sizeof(distanceBuf) - 1);
+  else writeFloatText(distanceBuf, sizeof(distanceBuf), lastDistance, 1);
+  distanceBuf[sizeof(distanceBuf) - 1] = '\0';
+
+  if (!dhtOK) {
+    strncpy(tempBuf, "null", sizeof(tempBuf) - 1);
+    strncpy(humidityBuf, "null", sizeof(humidityBuf) - 1);
+  } else {
+    writeFloatText(tempBuf, sizeof(tempBuf), dhtTemp, 1);
+    writeFloatText(humidityBuf, sizeof(humidityBuf), dhtHumidity, 0);
+  }
+  tempBuf[sizeof(tempBuf) - 1] = '\0';
+  humidityBuf[sizeof(humidityBuf) - 1] = '\0';
+
+  if (!loadCellOK) strncpy(weightBuf, "null", sizeof(weightBuf) - 1);
+  else writeFloatText(weightBuf, sizeof(weightBuf), foodWeightGram, 1);
+  weightBuf[sizeof(weightBuf) - 1] = '\0';
+
+  writeFloatText(thresholdBuf, sizeof(thresholdBuf), fanAutoThresholdC, 1);
+
+  char payload[512];
+  snprintf(payload, sizeof(payload),
+           "{"
+           "\"id\":\"%s\","
+           "\"d\":%s,"
+           "\"n\":%s,"
+           "\"t\":%s,"
+           "\"h\":%s,"
+           "\"w\":%s,"
+           "\"hf\":%s,"
+           "\"f\":%d,"
+           "\"fmo\":%s,"
+           "\"fmp\":%d,"
+           "\"fae\":%s,"
+           "\"fat\":%s,"
+           "\"ftr\":%s,"
+           "\"ts\":{\".sv\":\"timestamp\"}"
+           "}",
+           DEVICE_ID,
+           distanceBuf,
+           noEcho ? "true" : "false",
+           tempBuf,
+           humidityBuf,
+           weightBuf,
+           hasFoodInContainer ? "true" : "false",
+           fanSpeed,
+           fanManualOn ? "true" : "false",
+           fanManualPercent,
+           fanAutoEnabled ? "true" : "false",
+           thresholdBuf,
+           fanAutoTriggered ? "true" : "false");
 
   String path = "/sensors/latest.json";
   path += firebaseAuthQuery();
 
   Serial.println(F("[FB] Updating sensors/latest ..."));
-  if (!espHttpJsonRequest("PUT", path, payload))
+  if (!espHttpJsonRequest("PUT", path, String(payload))) {
     Serial.println(F("[FB WARN] sensors/latest update failed."));
+    return false;
+  }
+
+  updateLastPushedSnapshot();
+  return true;
 }
 
 void firebasePushRFIDScan() {
@@ -1800,6 +1959,74 @@ void readDistance() {
   Serial.print(F("[DIST] ")); Serial.print(lastDistance, 1); Serial.println(F(" cm"));
 }
 
+void readDistanceSmart() {
+  readDistance();
+
+  if (!noEcho && !adaptiveDistancePrevNoEcho && isFiniteFloat(adaptiveDistancePrev)) {
+    if (fabsf(lastDistance - adaptiveDistancePrev) < DIST_SIGNIFICANT_CHANGE) {
+      currentDistanceInterval = DISTANCE_IDLE_INTERVAL;
+    } else {
+      currentDistanceInterval = DISTANCE_INTERVAL;
+    }
+  } else {
+    currentDistanceInterval = DISTANCE_INTERVAL;
+  }
+
+  adaptiveDistancePrev = lastDistance;
+  adaptiveDistancePrevNoEcho = noEcho;
+}
+
+void checkOledDimming(unsigned long now) {
+  if (!oledOK) return;
+
+  bool hasActivity = (displayMode == MODE_RFID) || (!noEcho && lastDistance > 0.0f && lastDistance < 15.0f);
+
+  if (hasActivity) {
+    lastActivityTime = now;
+    if (oledDimmed) {
+      oled.dim(false);
+      oledDimmed = false;
+      Serial.println(F("[OLED] Restored brightness."));
+    }
+    return;
+  }
+
+  if (!oledDimmed && (now - lastActivityTime > OLED_DIM_TIMEOUT)) {
+    oled.dim(true);
+    oledDimmed = true;
+    Serial.println(F("[OLED] Dimmed to save power."));
+  }
+}
+
+void firebaseServiceWindow(unsigned long now) {
+  if (!wifiConnected) {
+    return;
+  }
+
+  bool dueFan = (now - lastFanControlPull >= FIREBASE_FAN_CONTROL_INTERVAL);
+  bool dueFeed = (now - lastFeedingControlPull >= FIREBASE_FEEDING_CONTROL_INTERVAL);
+  bool duePush = (now - lastFirebasePush >= FIREBASE_SENSOR_INTERVAL);
+
+  if (!dueFan && !dueFeed && !duePush) {
+    return;
+  }
+
+  if (duePush) {
+    lastFirebasePush = now;
+    firebasePushSensorLatest(false);
+  }
+
+  if (dueFan) {
+    lastFanControlPull = now;
+    firebasePullFanSettings();
+  }
+
+  if (dueFeed) {
+    lastFeedingControlPull = now;
+    firebasePullFeedingCommand();
+  }
+}
+
 
 // ═══════════════════════════════════════════════════════════
 //  DHT11: Temperature & Humidity Reading
@@ -1909,6 +2136,8 @@ void readRFID() {
 // ═══════════════════════════════════════════════════════════
 
 void setup() {
+  wdt_enable(WDTO_8S);
+
   Serial.begin(115200);
   while (!Serial && millis() < 3000);
 
@@ -2021,7 +2250,10 @@ void setup() {
 
   // ── ESP8266 ───────────────────────────────────────────
   initESP8266();
-  if (wifiConnected) configureESP8266SSL();
+  if (wifiConnected) {
+    configureESP8266SSL();
+    configureESP8266PowerSave();
+  }
 
   // Pull fan settings + first sensor sync right after WiFi comes up
   if (wifiConnected) {
@@ -2031,7 +2263,7 @@ void setup() {
     firebasePullFeedingCommand();
     lastFeedingControlPull = millis();
 
-    firebasePushSensorLatest();
+    firebasePushSensorLatest(true);
     lastFirebasePush = millis();
   }
 
@@ -2051,6 +2283,9 @@ void setup() {
   lastOfflineStoreTime = millis();
   lastOfflineFlushTime = millis();
   lastReconnectAttempt = millis();
+  currentDistanceInterval = DISTANCE_INTERVAL;
+  lastActivityTime = millis();
+  oledDimmed = false;
   previousWifiConnected = wifiConnected;
 }
 
@@ -2060,6 +2295,8 @@ void setup() {
 // ═══════════════════════════════════════════════════════════
 
 void loop() {
+  wdt_reset();
+
   unsigned long now = millis();
 
   if (wifiConnected != previousWifiConnected) {
@@ -2089,9 +2326,9 @@ void loop() {
   checkSerialCommandInput();
 
   // ── Distance reading ───────────────────────────────────
-  if (now - lastDistanceTime >= DISTANCE_INTERVAL) {
+  if (now - lastDistanceTime >= currentDistanceInterval) {
     lastDistanceTime = now;
-    readDistance();
+    readDistanceSmart();
   }
 
   // ── DHT11 reading every 3 s ────────────────────────────
@@ -2106,23 +2343,8 @@ void loop() {
     readFoodWeight();
   }
 
-  // ── Pull fan settings from Firebase ─────────────────────
-  if (wifiConnected && (now - lastFanControlPull >= FIREBASE_FAN_CONTROL_INTERVAL)) {
-    lastFanControlPull = now;
-    firebasePullFanSettings();
-  }
-
-  // ── Pull feeding command from Firebase ─────────────────
-  if (wifiConnected && (now - lastFeedingControlPull >= FIREBASE_FEEDING_CONTROL_INTERVAL)) {
-    lastFeedingControlPull = now;
-    firebasePullFeedingCommand();
-  }
-
-  // ── Firebase push (for Web App realtime display) ───────
-  if (wifiConnected && (now - lastFirebasePush >= FIREBASE_SENSOR_INTERVAL)) {
-    lastFirebasePush = now;
-    firebasePushSensorLatest();
-  }
+  // ── Combined Firebase service window ────────────────────
+  firebaseServiceWindow(now);
 
   // ── Buffer sensors to EEPROM every 5 min while offline ─
   storeOfflineSampleIfDue(now);
@@ -2141,6 +2363,7 @@ void loop() {
     displayMode = MODE_HUD;
 
   // ── OLED refresh ───────────────────────────────────────
+  checkOledDimming(now);
   if (oledOK && (now - lastOledTime >= OLED_INTERVAL)) {
     lastOledTime = now;
     if (displayMode == MODE_RFID) displayRFID();

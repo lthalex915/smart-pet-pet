@@ -286,8 +286,8 @@ async function fetchLatestWeight(uid: string): Promise<number | null> {
     return null;
   }
 
-  const value = source.val() as { weight?: unknown } | null;
-  const weight = value?.weight;
+  const value = source.val() as { weight?: unknown; w?: unknown } | null;
+  const weight = typeof value?.weight === 'number' ? value.weight : value?.w;
 
   return typeof weight === 'number' && Number.isFinite(weight)
     ? Number(weight.toFixed(1))
