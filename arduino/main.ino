@@ -256,10 +256,10 @@ const unsigned long OLED_INTERVAL                 = 150;
 const unsigned long BLINK_INTERVAL                = 500;
 const unsigned long DHT_INTERVAL                  = 3000;
 const unsigned long WEIGHT_INTERVAL               = 1500;
-const unsigned long FIREBASE_SENSOR_INTERVAL      = 3000;
-const unsigned long FIREBASE_FAN_CONTROL_INTERVAL = 2500;
-const unsigned long FIREBASE_FEEDING_CONTROL_INTERVAL = 1200;
-const unsigned long OFFLINE_STORE_INTERVAL         = 300000;
+const unsigned long FIREBASE_SENSOR_INTERVAL      = 15000;
+const unsigned long FIREBASE_FAN_CONTROL_INTERVAL = 20000;
+const unsigned long FIREBASE_FEEDING_CONTROL_INTERVAL = 5000;
+const unsigned long OFFLINE_STORE_INTERVAL         = 600000;
 const unsigned long OFFLINE_FLUSH_INTERVAL         = 2000;
 const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
 
