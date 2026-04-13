@@ -64,6 +64,22 @@ VITE_FIREBASE_MESSAGING_SENDER_ID=your_messaging_sender_id
 VITE_FIREBASE_APP_ID=your_app_id
 ```
 
+### Step B-1. EdgeOne 部署環境變數
+
+在 EdgeOne 的 Environment Variables 中，優先直接使用 `.env.local` 的原始 key 名稱（`VITE_FIREBASE_*`）。
+
+若你的 EdgeOne 專案有命名限制，也可使用以下替代 key，程式已支援自動 fallback：
+
+- `FIREBASE_API_KEY` / `EDGEONE_FIREBASE_API_KEY`
+- `FIREBASE_AUTH_DOMAIN` / `EDGEONE_FIREBASE_AUTH_DOMAIN`
+- `FIREBASE_DATABASE_URL` / `EDGEONE_FIREBASE_DATABASE_URL`
+- `FIREBASE_PROJECT_ID` / `EDGEONE_FIREBASE_PROJECT_ID`
+- `FIREBASE_STORAGE_BUCKET` / `EDGEONE_FIREBASE_STORAGE_BUCKET`
+- `FIREBASE_MESSAGING_SENDER_ID` / `EDGEONE_FIREBASE_MESSAGING_SENDER_ID`
+- `FIREBASE_APP_ID` / `EDGEONE_FIREBASE_APP_ID`
+
+> 建議：同一個專案只使用一組 key 命名方式，避免混用造成維運困擾。
+
 ### Step C. 啟動開發伺服器
 
 ```bash
