@@ -1,23 +1,43 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from 'react';
 import { signOut, linkWithPopup, type User } from 'firebase/auth';
+import {
+  Home,
+  LogOut,
+  Settings,
+  UtensilsCrossed,
+  Wifi,
+  WifiOff,
+  Wind,
+} from 'lucide-react';
 import { auth, googleProvider } from '../firebase';
-import { useSensorData } from '../hooks/useSensorData';
-import { useRFIDHistory } from '../hooks/useRFIDHistory';
-import { useUserPollInterval } from '../hooks/useUserPollInterval';
-import { useRFIDBinding } from '../hooks/useRFIDBinding';
-import { useBoardConnection } from '../hooks/useBoardConnection';
-import { useFanSettings } from '../hooks/useFanSettings';
-import { useFeedingControl } from '../hooks/useFeedingControl';
-import { useWeightControl } from '../hooks/useWeightControl';
 import SensorCard from '../components/SensorCard';
 import TempHumidityChart from '../components/TempHumidityChart';
 import RFIDLog from '../components/RFIDLog';
-import { Activity, Radio, Settings, Wifi, WifiOff, LogOut } from 'lucide-react';
+import DistanceBar from '../components/DistanceBar';
 import {
   POLL_INTERVAL_OPTIONS_MS,
   formatPollIntervalLabel,
 } from '../constants/pollInterval';
+import { useBoardConnection } from '../hooks/useBoardConnection';
+import { useDailyFoodConsumption } from '../hooks/useDailyFoodConsumption';
+import { useFanSettings } from '../hooks/useFanSettings';
+import { useFeedingControl } from '../hooks/useFeedingControl';
+import { useRFIDBinding } from '../hooks/useRFIDBinding';
+import { useRFIDHistory } from '../hooks/useRFIDHistory';
+import { useSensorData } from '../hooks/useSensorData';
+import { useUserPollInterval } from '../hooks/useUserPollInterval';
+import { useWeightControl } from '../hooks/useWeightControl';
 import { buildDefaultRFIDName, isSameRFIDUid, normalizeRFIDUid } from '../utils/rfid';
+
+type Tab = 'main' | 'feeding' | 'fan' | 'settings';
+
+interface Props { user: User }
+
+const DEV_MODE_KEY_PREFIX = 'smartpet:dev-mode:';
+
+function buildDevModeKey(uid: string): string {
+  return `${DEV_MODE_KEY_PREFIX}${uid}`;
+}
 
 function normalizeScheduleTime(value: string): string | null {
   const trimmed = value.trim();
@@ -37,18 +57,13 @@ function normalizeScheduleTime(value: string): string | null {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-function parseScheduleTimesInput(value: string): string[] {
-  const tokens = value
-    .split(/[\n,]/)
-    .map((token) => normalizeScheduleTime(token))
-    .filter((token): token is string => token != null);
+function normalizeScheduleTimesInput(value: string[]): string[] {
+  const normalized = value
+    .map((item) => normalizeScheduleTime(item))
+    .filter((item): item is string => item != null);
 
-  return Array.from(new Set(tokens)).sort((a, b) => a.localeCompare(b));
+  return Array.from(new Set(normalized)).sort((a, b) => a.localeCompare(b));
 }
-
-type Tab = 'sensors' | 'rfid' | 'settings';
-
-interface Props { user: User }
 
 function PawIcon({ className }: { className?: string }) {
   return (
@@ -81,7 +96,9 @@ function GoogleIcon() {
 }
 
 export default function Dashboard({ user }: Props) {
-  const [tab, setTab] = useState<Tab>('sensors');
+  const [tab, setTab] = useState<Tab>('main');
+  const [devMode, setDevMode] = useState(false);
+
   const [linkLoading, setLinkLoading] = useState(false);
   const [linkMsg, setLinkMsg] = useState('');
 
@@ -105,7 +122,7 @@ export default function Dashboard({ user }: Props) {
   const [feedingSettingsMsg, setFeedingSettingsMsg] = useState('');
   const [feedingTimezoneInput, setFeedingTimezoneInput] = useState('Asia/Hong_Kong');
   const [feedingScheduleEnabledInput, setFeedingScheduleEnabledInput] = useState(true);
-  const [feedingScheduleTimesInput, setFeedingScheduleTimesInput] = useState('08:00, 20:00');
+  const [feedingScheduleTimesInput, setFeedingScheduleTimesInput] = useState<string[]>(['08:00', '20:00']);
   const [feedingMotorRunMsInput, setFeedingMotorRunMsInput] = useState(1000);
   const [feedingThresholdInput, setFeedingThresholdInput] = useState(2);
   const [waterPumpIntervalMinInput, setWaterPumpIntervalMinInput] = useState(20);
@@ -170,8 +187,28 @@ export default function Dashboard({ user }: Props) {
     error: weightError,
     tare: triggerWeightTare,
   } = useWeightControl(user.uid);
+  const {
+    todayConsumedG,
+    loading: dailyConsumedLoading,
+    error: dailyConsumedError,
+  } = useDailyFoodConsumption(
+    user.uid,
+    data?.foodConsumedTotalG ?? null,
+    feedingSettings.timezone,
+    pollIntervalMs,
+  );
 
   const latestScan = scans[0] ?? null;
+
+  useEffect(() => {
+    const key = buildDevModeKey(user.uid);
+
+    try {
+      setDevMode(window.localStorage.getItem(key) === '1');
+    } catch {
+      setDevMode(false);
+    }
+  }, [user.uid]);
 
   useEffect(() => {
     if (!binding) {
@@ -208,7 +245,7 @@ export default function Dashboard({ user }: Props) {
 
     setFeedingTimezoneInput(feedingSettings.timezone);
     setFeedingScheduleEnabledInput(feedingSettings.scheduleEnabled);
-    setFeedingScheduleTimesInput(feedingSettings.scheduleTimes.join(', '));
+    setFeedingScheduleTimesInput(feedingSettings.scheduleTimes.length > 0 ? feedingSettings.scheduleTimes : ['08:00']);
     setFeedingMotorRunMsInput(feedingSettings.motorRunMs);
     setFeedingThresholdInput(feedingSettings.weightDeltaThresholdG);
     setWaterPumpIntervalMinInput(feedingSettings.waterPumpIntervalMin);
@@ -217,14 +254,24 @@ export default function Dashboard({ user }: Props) {
     setFeedingMaxAttemptsInput(feedingSettings.maxAttempts);
   }, [feedingFormDirty, feedingSettings]);
 
-  // Check if user already has Google linked
-  const hasGoogleLinked = user.providerData.some(p => p.providerId === 'google.com');
-  // Check if user has email/password provider
-  const hasPasswordProvider = user.providerData.some(p => p.providerId === 'password');
+  const hasGoogleLinked = user.providerData.some((provider) => provider.providerId === 'google.com');
+  const hasPasswordProvider = user.providerData.some((provider) => provider.providerId === 'password');
+
+  const handleToggleDevMode = (enabled: boolean) => {
+    setDevMode(enabled);
+
+    try {
+      const key = buildDevModeKey(user.uid);
+      window.localStorage.setItem(key, enabled ? '1' : '0');
+    } catch {
+      // Ignore localStorage errors.
+    }
+  };
 
   const handleLinkGoogle = async () => {
     setLinkLoading(true);
     setLinkMsg('');
+
     try {
       await linkWithPopup(user, googleProvider);
       setLinkMsg('✓ Google 帳號已成功連結！');
@@ -367,14 +414,34 @@ export default function Dashboard({ user }: Props) {
     setManualFeedingMsg(ok ? '✓ 已完成投餵並確認重量變化' : '⚠ 投餵失敗，請檢查容器與馬達');
   };
 
+  const updateScheduleTimeAtIndex = (index: number, value: string) => {
+    setFeedingScheduleTimesInput((prev) => prev.map((item, itemIndex) => (itemIndex === index ? value : item)));
+    setFeedingFormDirty(true);
+  };
+
+  const addScheduleTime = () => {
+    setFeedingScheduleTimesInput((prev) => [...prev, '12:00']);
+    setFeedingFormDirty(true);
+  };
+
+  const removeScheduleTimeAtIndex = (index: number) => {
+    setFeedingScheduleTimesInput((prev) => {
+      if (prev.length <= 1) {
+        return prev;
+      }
+      return prev.filter((_, itemIndex) => itemIndex !== index);
+    });
+    setFeedingFormDirty(true);
+  };
+
   const handleSaveFeedingSettings = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFeedingSettingsMsg('');
 
     try {
-      const scheduleTimes = parseScheduleTimesInput(feedingScheduleTimesInput);
+      const scheduleTimes = normalizeScheduleTimesInput(feedingScheduleTimesInput);
       if (scheduleTimes.length === 0) {
-        throw new Error('請至少輸入一個時間（格式 HH:mm，例如 08:00）');
+        throw new Error('請至少選擇一個排程時間');
       }
 
       await saveFeedingSettings({
@@ -389,6 +456,7 @@ export default function Dashboard({ user }: Props) {
         maxAttempts: feedingMaxAttemptsInput,
       });
 
+      setFeedingScheduleTimesInput(scheduleTimes);
       setFeedingFormDirty(false);
       setFeedingSettingsMsg('✓ 自動投餵設定已儲存');
     } catch (err: unknown) {
@@ -455,37 +523,35 @@ export default function Dashboard({ user }: Props) {
     if (!binding) {
       return {
         tone: 'amber' as const,
-        text: `偵測到 UID ${latestScan.uid}，請先在設定頁完成綁定`,
+        text: `偵測到 UID ${latestScan.uid}，尚未完成綁定`,
       };
     }
 
     if (isSameRFIDUid(latestScan.uid, binding.uid)) {
       return {
         tone: 'green' as const,
-        text: `Tap successful：${binding.name}（${binding.uid}），掃卡事件已上傳`,
+        text: `Tap successful：${binding.name}（${binding.uid}）`,
       };
     }
 
     return {
       tone: 'red' as const,
-      text: `偵測到 UID ${latestScan.uid}，與已綁定 UID ${binding.uid} 不符，不觸發功能`,
+      text: `偵測到 UID ${latestScan.uid}，與已綁定 UID ${binding.uid} 不符`,
     };
   }, [binding, latestScan]);
 
   const BLUE = '#1937E6';
 
   const navItems = [
-    { id: 'sensors' as Tab, Icon: Activity, label: '感測器' },
-    { id: 'rfid' as Tab, Icon: Radio, label: 'RFID' },
+    { id: 'main' as Tab, Icon: Home, label: '主頁' },
+    { id: 'feeding' as Tab, Icon: UtensilsCrossed, label: '投餵' },
+    { id: 'fan' as Tab, Icon: Wind, label: '風扇' },
     { id: 'settings' as Tab, Icon: Settings, label: '設定' },
   ] as const;
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 flex flex-col">
-
-      {/* ── Header ─────────────────────────────────────── */}
-      <header className="sticky top-0 z-10 bg-white border-b border-gray-100
-                         px-5 py-4 flex items-center justify-between shadow-sm">
+      <header className="sticky top-0 z-10 bg-white border-b border-gray-100 px-5 py-4 flex items-center justify-between shadow-sm">
         <div>
           <div className="flex items-center gap-2 mb-0.5">
             <div
@@ -529,18 +595,14 @@ export default function Dashboard({ user }: Props) {
           : <WifiOff className="text-gray-300 w-5 h-5" />}
       </header>
 
-      {/* ── Desktop Sidebar + Content ───────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-
-        {/* Sidebar (desktop only) */}
         <aside className="hidden md:flex flex-col w-56 bg-white border-r border-gray-100 pt-6 pb-8 shrink-0 shadow-sm">
           <nav className="flex flex-col gap-1 px-3">
             {navItems.map(({ id, Icon, label }) => (
               <button
                 key={id}
                 onClick={() => setTab(id)}
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all
-                            ${tab === id ? 'text-white shadow-sm' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
+                className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${tab === id ? 'text-white shadow-sm' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
                 style={tab === id ? { backgroundColor: BLUE } : {}}
               >
                 <Icon className="w-4 h-4 shrink-0" />
@@ -549,7 +611,6 @@ export default function Dashboard({ user }: Props) {
             ))}
           </nav>
 
-          {/* User info at bottom of sidebar */}
           <div className="mt-auto px-3">
             <div className="bg-gray-50 rounded-xl p-3 flex items-center gap-3">
               <div
@@ -563,16 +624,13 @@ export default function Dashboard({ user }: Props) {
           </div>
         </aside>
 
-        {/* ── Main Content ─────────────────────────────── */}
         <main className="flex-1 overflow-y-auto p-5 md:p-8 pb-28 md:pb-8">
-          <div className="max-w-2xl mx-auto md:max-w-none">
-
-            {tab === 'sensors' && (
+          <div className="max-w-5xl mx-auto">
+            {tab === 'main' && (
               <div className="space-y-5">
-                {/* Page title */}
                 <div>
-                  <h2 className="text-xl font-bold text-gray-900">感測器數據</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">即時環境監測（溫度、濕度與飼料重量）</p>
+                  <h2 className="text-xl font-bold text-gray-900">主頁總覽</h2>
+                  <p className="text-sm text-gray-400 mt-0.5">溫濕度、食量、風扇與飼料狀態一頁查看</p>
                 </div>
 
                 {!loading && !data && (
@@ -581,127 +639,34 @@ export default function Dashboard({ user }: Props) {
                   </div>
                 )}
 
-                <div className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm space-y-2">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">投餵控制</p>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleManualFeed}
-                      disabled={feedingTriggering || feedingRuntime.inProgress}
-                      className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
-                      style={{ backgroundColor: BLUE }}
-                    >
-                      {feedingTriggering || feedingRuntime.inProgress ? '投餵中…' : '轉一次（約 1 秒）'}
-                    </button>
-
-                    <span className="text-xs text-gray-500">
-                      狀態：{feedingRuntime.lastMessage}
-                    </span>
-                  </div>
-
-                  {(manualFeedingMsg || feedingError) && (
-                    <p
-                      className="text-sm"
-                      style={{
-                        color:
-                          (manualFeedingMsg && manualFeedingMsg.startsWith('✓'))
-                            ? '#16a34a'
-                            : '#dc2626',
-                      }}
-                    >
-                      {manualFeedingMsg || feedingError}
-                    </p>
-                  )}
-
-                  {feedingRuntime.alert && (
-                    <div className="rounded-2xl px-3 py-2 text-sm border bg-red-50 border-red-100 text-red-700 flex items-center justify-between gap-2">
-                      <span>已連續 3 次無重量變化，請檢查容器是否堵塞或空桶。</span>
-                      <button
-                        type="button"
-                        onClick={handleClearFeedingAlert}
-                        className="text-xs font-medium px-2.5 py-1 rounded-lg border border-red-200 text-red-700 hover:bg-red-100"
-                      >
-                        清除提醒
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <div className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm space-y-2">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">重量感測器歸零</p>
-                  <p className="text-xs text-gray-500">先把碗放在感測器上，再按歸零，把目前重量當作 0g 起點。</p>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleWeightTare}
-                      disabled={triggeringTare}
-                      className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
-                      style={{ backgroundColor: BLUE }}
-                    >
-                      {triggeringTare ? '歸零中…' : '重量歸零（0g）'}
-                    </button>
-
-                    <span className="text-xs text-gray-500">
-                      當前讀值：{data?.weight != null ? `${data.weight.toFixed(1)} g` : '--'}
-                    </span>
-                  </div>
-
-                  {(weightMsg || weightError) && (
-                    <p
-                      className="text-sm"
-                      style={{
-                        color:
-                          (weightMsg && weightMsg.startsWith('✓'))
-                            ? '#16a34a'
-                            : '#dc2626',
-                      }}
-                    >
-                      {weightMsg || weightError}
-                    </p>
-                  )}
-                </div>
-
                 <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 md:gap-4">
                   <SensorCard
                     label="溫度"
-                    value={data?.temperature != null
-                      ? data.temperature.toFixed(1)
-                      : '--'}
+                    value={data?.temperature != null ? data.temperature.toFixed(1) : '--'}
                     unit="°C"
                     loading={loading}
                   />
                   <SensorCard
                     label="濕度"
-                    value={data?.humidity != null
-                      ? String(Math.round(data.humidity))
-                      : '--'}
+                    value={data?.humidity != null ? String(Math.round(data.humidity)) : '--'}
                     unit="%"
                     loading={loading}
                   />
                   <SensorCard
                     label="飼料重量"
-                    value={data?.weight != null
-                      ? data.weight.toFixed(1)
-                      : '--'}
+                    value={data?.weight != null ? data.weight.toFixed(1) : '--'}
                     unit="g"
                     loading={loading}
                   />
                   <SensorCard
-                    label="本次食用量"
-                    value={typeof data?.foodConsumedLastG === 'number'
-                      ? data.foodConsumedLastG.toFixed(1)
-                      : '--'}
+                    label="本日食用量"
+                    value={typeof todayConsumedG === 'number' && !dailyConsumedLoading ? todayConsumedG.toFixed(1) : '--'}
                     unit="g"
-                    loading={loading}
+                    loading={loading || dailyConsumedLoading}
                   />
                   <SensorCard
                     label="飼料狀態"
-                    value={data
-                      ? data.hasFood
-                        ? '有'
-                        : '無'
-                      : '--'}
+                    value={data ? (data.hasFood ? '有' : '無') : '--'}
                     unit="容器內"
                     loading={loading}
                     warn={!loading && !!data && !data.hasFood}
@@ -713,6 +678,12 @@ export default function Dashboard({ user }: Props) {
                     loading={loading && fanLoading}
                   />
                 </div>
+
+                {dailyConsumedError && (
+                  <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-amber-50 border-amber-100 text-amber-700">
+                    本日食用量同步異常：{dailyConsumedError}
+                  </div>
+                )}
 
                 {!loading && typeof data?.foodConsumedTotalG === 'number' && (
                   <div className="rounded-2xl px-4 py-3 text-sm border shadow-sm bg-emerald-50 border-emerald-100 text-emerald-700">
@@ -738,6 +709,7 @@ export default function Dashboard({ user }: Props) {
                   </div>
                 )}
 
+                <DistanceBar distance={data?.distance ?? null} noEcho={Boolean(data?.noEcho)} />
                 <TempHumidityChart trend={trend} loading={loading} />
 
                 {data?.deviceId && (
@@ -748,183 +720,101 @@ export default function Dashboard({ user }: Props) {
               </div>
             )}
 
-            {tab === 'rfid' && (
-              <div className="space-y-4">
+            {tab === 'feeding' && (
+              <div className="space-y-4 max-w-2xl">
                 <div>
-                  <h2 className="text-xl font-bold text-gray-900">RFID 紀錄</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">顯示刷卡紀錄與綁定比對結果（硬體端可設定掃卡觸發投餵）</p>
+                  <h2 className="text-xl font-bold text-gray-900">投餵</h2>
+                  <p className="text-sm text-gray-400 mt-0.5">手動投餵、重量歸零與自動投餵時程設定</p>
                 </div>
 
-                {binding && (
-                  <div className="bg-white border border-blue-100 rounded-2xl px-4 py-3 text-sm text-blue-700 shadow-sm">
-                    已綁定：<span className="font-semibold">{binding.name}</span>（UID: {binding.uid}）
-                  </div>
-                )}
-
-                {latestTapStatus && (
-                  <div
-                    className={`rounded-2xl px-4 py-3 text-sm border shadow-sm ${
-                      latestTapStatus.tone === 'green'
+                <div
+                  className={`rounded-2xl px-3 py-2 text-sm border ${
+                    feedingStatusTone === 'red'
+                      ? 'bg-red-50 border-red-100 text-red-700'
+                      : feedingStatusTone === 'green'
                         ? 'bg-green-50 border-green-100 text-green-700'
-                        : latestTapStatus.tone === 'amber'
-                          ? 'bg-amber-50 border-amber-100 text-amber-700'
-                          : 'bg-red-50 border-red-100 text-red-700'
-                    }`}
-                  >
-                    {latestTapStatus.text}
-                  </div>
-                )}
-
-                {scansLoading && (
-                  <p className="text-xs text-gray-400 animate-pulse">讀取 RFID 紀錄中…</p>
-                )}
-
-                {scansError && (
-                  <p className="text-xs text-red-500">{scansError}</p>
-                )}
-
-                <RFIDLog scans={scans} binding={binding} />
-              </div>
-            )}
-
-            {tab === 'settings' && (
-              <div className="space-y-4 max-w-lg">
-                <div className="mb-2">
-                  <h2 className="text-xl font-bold text-gray-900">設定</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">帳戶、Board、投餵、風扇控制、同步頻率與 RFID 綁定</p>
+                        : 'bg-blue-50 border-blue-100 text-blue-700'
+                  }`}
+                >
+                  {feedingRuntime.lastMessage}
                 </div>
 
-                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider mb-3">已登入帳號</p>
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm"
+                <div className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm space-y-2">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">投餵功能</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleManualFeed}
+                      disabled={feedingTriggering || feedingRuntime.inProgress}
+                      className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
                       style={{ backgroundColor: BLUE }}
                     >
-                      {user.email?.[0]?.toUpperCase() ?? 'U'}
-                    </div>
-                    <p className="text-gray-700 text-sm font-medium">{user.email}</p>
+                      {feedingTriggering || feedingRuntime.inProgress ? '投餵中…' : '投餵一次'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleWeightTare}
+                      disabled={triggeringTare}
+                      className="text-sm font-medium px-4 py-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {triggeringTare ? '歸零中…' : '重量感測器歸零'}
+                    </button>
                   </div>
-                </div>
 
-                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">Board 連線</p>
-
-                  <p className="text-xs text-gray-500">
-                    目前狀態：{
-                      boardLoading
-                        ? '讀取中…'
-                        : connectedBoardId
-                          ? `已連線 ${connectedBoardId}`
-                          : '尚未連線'
-                    }
-                  </p>
-
-                  <form className="space-y-3" onSubmit={handleConnectBoard}>
-                    <div>
-                      <label htmlFor="board-id" className="text-gray-500 text-xs mb-1 block">Board ID</label>
-                      <input
-                        id="board-id"
-                        value={boardIdInput}
-                        onChange={(event) => setBoardIdInput(event.target.value)}
-                        placeholder="例如：arduino-mega-01"
-                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        autoComplete="off"
-                      />
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="submit"
-                        disabled={boardSaving}
-                        className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
-                        style={{ backgroundColor: BLUE }}
-                      >
-                        {boardSaving ? '連線中…' : '連線 Board'}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleDisconnectBoard}
-                        disabled={!connectedBoardId || boardSaving}
-                        className="text-sm font-medium px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        中斷 Board
-                      </button>
-                    </div>
-                  </form>
-
-                  {(boardMsg || boardError) && (
+                  {(manualFeedingMsg || feedingError || weightMsg || weightError) && (
                     <p
                       className="text-sm"
                       style={{
                         color:
-                          (boardMsg && boardMsg.startsWith('✓'))
+                          (manualFeedingMsg && manualFeedingMsg.startsWith('✓')) || (weightMsg && weightMsg.startsWith('✓'))
                             ? '#16a34a'
                             : '#dc2626',
                       }}
                     >
-                      {boardMsg || boardError}
+                      {manualFeedingMsg || feedingError || weightMsg || weightError}
                     </p>
+                  )}
+
+                  {feedingRuntime.alert && (
+                    <div className="rounded-2xl px-3 py-2 text-sm border bg-red-50 border-red-100 text-red-700 flex items-center justify-between gap-2">
+                      <span>已連續 3 次無重量變化，請檢查容器是否堵塞或空桶。</span>
+                      <button
+                        type="button"
+                        onClick={handleClearFeedingAlert}
+                        className="text-xs font-medium px-2.5 py-1 rounded-lg border border-red-200 text-red-700 hover:bg-red-100"
+                      >
+                        清除提醒
+                      </button>
+                    </div>
                   )}
                 </div>
 
-                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider mb-3">Firebase 推送間隔</p>
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="flex-1">
-                      <label htmlFor="poll-interval" className="text-gray-500 text-xs mb-1 block">
-                        更新頻率
-                      </label>
-                      <select
-                        id="poll-interval"
-                        value={pollIntervalMs}
-                        onChange={handlePollIntervalChange}
-                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                      >
-                        {POLL_INTERVAL_OPTIONS_MS.map((ms) => (
-                          <option key={ms} value={ms}>
-                            {formatPollIntervalLabel(ms)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <span
-                      className="text-white text-xs font-medium px-2.5 py-1 rounded-full self-start sm:self-auto"
-                      style={{ backgroundColor: BLUE }}
-                    >
-                      目前每 {formatPollIntervalLabel(pollIntervalMs)}
+                <div className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm space-y-1">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">食用量</p>
+                  <p className="text-sm text-gray-700">
+                    本日食用量：
+                    <span className="font-semibold ml-1">
+                      {dailyConsumedLoading || typeof todayConsumedG !== 'number' ? '--' : `${todayConsumedG.toFixed(1)} g`}
                     </span>
-                  </div>
+                  </p>
+                  <p className="text-sm text-gray-500">
+                    累積食用量：{typeof data?.foodConsumedTotalG === 'number' ? `${data.foodConsumedTotalG.toFixed(1)} g` : '--'}
+                  </p>
                 </div>
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">投餵排程與時區設定</p>
-
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">投餵設定</p>
                   <p className="text-xs text-gray-500">
-                    目前狀態：
                     {feedingSettingsLoading || feedingRuntimeLoading
-                      ? ' 讀取中…'
-                      : ` ${feedingRuntime.lastStatus === 'failed' ? '失敗' : feedingRuntime.lastStatus === 'success' ? '成功' : feedingRuntime.lastStatus === 'in_progress' ? '進行中' : '待命'} · ${feedingSettings.scheduleEnabled ? '排程啟用' : '排程停用'} · 時區 ${feedingSettings.timezone}`}
+                      ? '讀取中…'
+                      : `${feedingSettings.scheduleEnabled ? '排程啟用' : '排程停用'} · 時區 ${feedingSettings.timezone}`}
                   </p>
-
-                  <div
-                    className={`rounded-2xl px-3 py-2 text-sm border ${
-                      feedingStatusTone === 'red'
-                        ? 'bg-red-50 border-red-100 text-red-700'
-                        : feedingStatusTone === 'green'
-                          ? 'bg-green-50 border-green-100 text-green-700'
-                          : 'bg-blue-50 border-blue-100 text-blue-700'
-                    }`}
-                  >
-                    {feedingRuntime.lastMessage}
-                  </div>
 
                   <form className="space-y-3" onSubmit={handleSaveFeedingSettings}>
                     <div>
                       <label htmlFor="feeding-timezone" className="text-gray-500 text-xs mb-1 block">
-                        時區（預設 Hong Kong）
+                        時區
                       </label>
                       <select
                         id="feeding-timezone"
@@ -957,146 +847,167 @@ export default function Dashboard({ user }: Props) {
                       啟用自動排程投餵
                     </label>
 
-                    <div>
-                      <label htmlFor="feeding-schedule-times" className="text-gray-500 text-xs mb-1 block">
-                        排程時間（HH:mm，以逗號分隔）
+                    <div className="space-y-2">
+                      <label className="text-gray-500 text-xs block">
+                        排程時間
                       </label>
-                      <input
-                        id="feeding-schedule-times"
-                        value={feedingScheduleTimesInput}
+                      {feedingScheduleTimesInput.map((timeValue, index) => (
+                        <div key={`${index}-${timeValue}`} className="flex items-center gap-2">
+                          <input
+                            type="time"
+                            value={timeValue}
+                            onChange={(event) => updateScheduleTimeAtIndex(index, event.target.value)}
+                            disabled={feedingSettingsSaving}
+                            className="text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeScheduleTimeAtIndex(index)}
+                            disabled={feedingScheduleTimesInput.length <= 1 || feedingSettingsSaving}
+                            className="text-xs font-medium px-2.5 py-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            刪除
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={addScheduleTime}
+                        disabled={feedingSettingsSaving}
+                        className="text-xs font-medium px-3 py-1.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50"
+                      >
+                        新增時間
+                      </button>
+                    </div>
+
+                    <div>
+                      <label htmlFor="water-pump-interval" className="text-gray-500 text-xs mb-1 block">
+                        水泵補水頻率（分鐘）
+                      </label>
+                      <select
+                        id="water-pump-interval"
+                        value={waterPumpIntervalMinInput}
                         onChange={(event) => {
-                          setFeedingScheduleTimesInput(event.target.value);
+                          setWaterPumpIntervalMinInput(Number(event.target.value));
                           setFeedingFormDirty(true);
                         }}
                         disabled={feedingSettingsSaving}
-                        placeholder="08:00, 20:00"
                         className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                      />
+                      >
+                        {[15, 20, 25, 30].map((minutes) => (
+                          <option key={minutes} value={minutes}>
+                            每 {minutes} 分鐘
+                          </option>
+                        ))}
+                      </select>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div>
-                        <label htmlFor="feeding-motor-ms" className="text-gray-500 text-xs mb-1 block">
-                          單次馬達轉動時間（ms）
-                        </label>
-                        <input
-                          id="feeding-motor-ms"
-                          type="number"
-                          min={300}
-                          max={5000}
-                          step={100}
-                          value={feedingMotorRunMsInput}
-                          onChange={(event) => {
-                            setFeedingMotorRunMsInput(Number(event.target.value));
-                            setFeedingFormDirty(true);
-                          }}
-                          disabled={feedingSettingsSaving}
-                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        />
-                      </div>
+                    {devMode && (
+                      <div className="rounded-2xl border border-gray-100 bg-gray-50 p-3 space-y-3">
+                        <p className="text-xs text-gray-500 font-medium">進階設定（Dev Mode）</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label htmlFor="feeding-motor-ms" className="text-gray-500 text-xs mb-1 block">
+                              單次馬達轉動時間（ms）
+                            </label>
+                            <input
+                              id="feeding-motor-ms"
+                              type="number"
+                              min={300}
+                              max={5000}
+                              step={100}
+                              value={feedingMotorRunMsInput}
+                              onChange={(event) => {
+                                setFeedingMotorRunMsInput(Number(event.target.value));
+                                setFeedingFormDirty(true);
+                              }}
+                              disabled={feedingSettingsSaving}
+                              className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            />
+                          </div>
 
-                      <div>
-                        <label htmlFor="feeding-delta-threshold" className="text-gray-500 text-xs mb-1 block">
-                          重量差門檻（g）
-                        </label>
-                        <input
-                          id="feeding-delta-threshold"
-                          type="number"
-                          min={0.5}
-                          max={50}
-                          step={0.1}
-                          value={feedingThresholdInput}
-                          onChange={(event) => {
-                            setFeedingThresholdInput(Number(event.target.value));
-                            setFeedingFormDirty(true);
-                          }}
-                          disabled={feedingSettingsSaving}
-                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        />
-                      </div>
+                          <div>
+                            <label htmlFor="feeding-delta-threshold" className="text-gray-500 text-xs mb-1 block">
+                              重量差門檻（g）
+                            </label>
+                            <input
+                              id="feeding-delta-threshold"
+                              type="number"
+                              min={0.5}
+                              max={50}
+                              step={0.1}
+                              value={feedingThresholdInput}
+                              onChange={(event) => {
+                                setFeedingThresholdInput(Number(event.target.value));
+                                setFeedingFormDirty(true);
+                              }}
+                              disabled={feedingSettingsSaving}
+                              className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            />
+                          </div>
 
-                      <div>
-                        <label htmlFor="water-pump-interval" className="text-gray-500 text-xs mb-1 block">
-                          水泵補水頻率（分鐘）
-                        </label>
-                        <select
-                          id="water-pump-interval"
-                          value={waterPumpIntervalMinInput}
-                          onChange={(event) => {
-                            setWaterPumpIntervalMinInput(Number(event.target.value));
-                            setFeedingFormDirty(true);
-                          }}
-                          disabled={feedingSettingsSaving}
-                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        >
-                          {[15, 20, 25, 30].map((minutes) => (
-                            <option key={minutes} value={minutes}>
-                              每 {minutes} 分鐘
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                          <div>
+                            <label htmlFor="feeding-confirm-ms" className="text-gray-500 text-xs mb-1 block">
+                              等待重量回傳（ms）
+                            </label>
+                            <input
+                              id="feeding-confirm-ms"
+                              type="number"
+                              min={1000}
+                              max={20000}
+                              step={100}
+                              value={feedingConfirmationInput}
+                              onChange={(event) => {
+                                setFeedingConfirmationInput(Number(event.target.value));
+                                setFeedingFormDirty(true);
+                              }}
+                              disabled={feedingSettingsSaving}
+                              className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            />
+                          </div>
 
-                      <div>
-                        <label htmlFor="feeding-confirm-ms" className="text-gray-500 text-xs mb-1 block">
-                          等待重量回傳（ms）
-                        </label>
-                        <input
-                          id="feeding-confirm-ms"
-                          type="number"
-                          min={1000}
-                          max={20000}
-                          step={100}
-                          value={feedingConfirmationInput}
-                          onChange={(event) => {
-                            setFeedingConfirmationInput(Number(event.target.value));
-                            setFeedingFormDirty(true);
-                          }}
-                          disabled={feedingSettingsSaving}
-                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        />
-                      </div>
+                          <div>
+                            <label htmlFor="feeding-retry-delay" className="text-gray-500 text-xs mb-1 block">
+                              重試間隔（ms）
+                            </label>
+                            <input
+                              id="feeding-retry-delay"
+                              type="number"
+                              min={400}
+                              max={10000}
+                              step={100}
+                              value={feedingRetryDelayInput}
+                              onChange={(event) => {
+                                setFeedingRetryDelayInput(Number(event.target.value));
+                                setFeedingFormDirty(true);
+                              }}
+                              disabled={feedingSettingsSaving}
+                              className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            />
+                          </div>
 
-                      <div>
-                        <label htmlFor="feeding-retry-delay" className="text-gray-500 text-xs mb-1 block">
-                          重試間隔（ms）
-                        </label>
-                        <input
-                          id="feeding-retry-delay"
-                          type="number"
-                          min={400}
-                          max={10000}
-                          step={100}
-                          value={feedingRetryDelayInput}
-                          onChange={(event) => {
-                            setFeedingRetryDelayInput(Number(event.target.value));
-                            setFeedingFormDirty(true);
-                          }}
-                          disabled={feedingSettingsSaving}
-                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        />
+                          <div>
+                            <label htmlFor="feeding-max-attempts" className="text-gray-500 text-xs mb-1 block">
+                              最多重試次數
+                            </label>
+                            <input
+                              id="feeding-max-attempts"
+                              type="number"
+                              min={1}
+                              max={5}
+                              step={1}
+                              value={feedingMaxAttemptsInput}
+                              onChange={(event) => {
+                                setFeedingMaxAttemptsInput(Number(event.target.value));
+                                setFeedingFormDirty(true);
+                              }}
+                              disabled={feedingSettingsSaving}
+                              className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            />
+                          </div>
+                        </div>
                       </div>
-
-                      <div>
-                        <label htmlFor="feeding-max-attempts" className="text-gray-500 text-xs mb-1 block">
-                          最多重試次數
-                        </label>
-                        <input
-                          id="feeding-max-attempts"
-                          type="number"
-                          min={1}
-                          max={5}
-                          step={1}
-                          value={feedingMaxAttemptsInput}
-                          onChange={(event) => {
-                            setFeedingMaxAttemptsInput(Number(event.target.value));
-                            setFeedingFormDirty(true);
-                          }}
-                          disabled={feedingSettingsSaving}
-                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        />
-                      </div>
-                    </div>
+                    )}
 
                     <button
                       type="submit"
@@ -1122,36 +1033,45 @@ export default function Dashboard({ user }: Props) {
                     </p>
                   )}
 
-                  <div className="space-y-1">
-                    <p className="text-gray-500 text-xs">最近投餵紀錄：</p>
-                    {feedingEventsLoading ? (
-                      <p className="text-xs text-gray-400">讀取中…</p>
-                    ) : feedingEvents.length === 0 ? (
-                      <p className="text-xs text-gray-400">尚無投餵紀錄</p>
-                    ) : (
-                      <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                        {feedingEvents.slice(0, 6).map((eventItem) => (
-                          <div
-                            key={eventItem.id}
-                            className="text-xs bg-gray-50 border border-gray-100 rounded-xl px-2.5 py-2 text-gray-600"
-                          >
-                            <p className="font-medium text-gray-700">
-                              {new Date(eventItem.createdAt).toLocaleString()} · {eventItem.source} · #{eventItem.attempt} · {eventItem.type}
-                            </p>
-                            <p>{eventItem.message}</p>
-                            {typeof eventItem.delta === 'number' && (
-                              <p className="text-gray-500">重量變化：{eventItem.delta.toFixed(1)}g</p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  {devMode && (
+                    <div className="space-y-1">
+                      <p className="text-gray-500 text-xs">最近投餵紀錄：</p>
+                      {feedingEventsLoading ? (
+                        <p className="text-xs text-gray-400">讀取中…</p>
+                      ) : feedingEvents.length === 0 ? (
+                        <p className="text-xs text-gray-400">尚無投餵紀錄</p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                          {feedingEvents.slice(0, 6).map((eventItem) => (
+                            <div
+                              key={eventItem.id}
+                              className="text-xs bg-gray-50 border border-gray-100 rounded-xl px-2.5 py-2 text-gray-600"
+                            >
+                              <p className="font-medium text-gray-700">
+                                {new Date(eventItem.createdAt).toLocaleString()} · {eventItem.source} · #{eventItem.attempt} · {eventItem.type}
+                              </p>
+                              <p>{eventItem.message}</p>
+                              {typeof eventItem.delta === 'number' && (
+                                <p className="text-gray-500">重量變化：{eventItem.delta.toFixed(1)}g</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {tab === 'fan' && (
+              <div className="space-y-4 max-w-lg">
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900">風扇控制</h2>
+                  <p className="text-sm text-gray-400 mt-0.5">手動風速與溫度自動開啟設定</p>
                 </div>
 
                 <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">風扇控制設定</p>
-
                   <p className="text-xs text-gray-500">
                     即時狀態：
                     {fanLoading
@@ -1235,10 +1155,13 @@ export default function Dashboard({ user }: Props) {
                         disabled={fanSaving || !fanAutoEnabledInput}
                         className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
                       />
-                      <p className="text-xs text-gray-400 mt-1">
-                        當 DHT11 偵測溫度 ≥ 此值時，自動開啟風扇。預設 27°C。
-                      </p>
                     </div>
+
+                    {devMode && (
+                      <p className="text-xs text-gray-400">
+                        Runtime：manualOn={String(fanSettings.manualOn)} / autoTriggered={String(fanAutoTriggeredCurrent)} / threshold={fanThresholdCurrent.toFixed(1)}°C
+                      </p>
+                    )}
 
                     <button
                       type="submit"
@@ -1264,85 +1187,42 @@ export default function Dashboard({ user }: Props) {
                     </p>
                   )}
                 </div>
+              </div>
+            )}
 
-                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
-                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">RFID 綁定設定</p>
-
-                  <p className="text-xs text-gray-500">
-                    目前狀態：{bindingLoading ? '讀取中…' : binding ? `已連結 ${binding.name}（${binding.uid}）` : '尚未連結'}
-                  </p>
-
-                  <form className="space-y-3" onSubmit={handleSaveRFIDBinding}>
-                    <div>
-                      <label htmlFor="rfid-uid" className="text-gray-500 text-xs mb-1 block">RFID UID</label>
-                      <input
-                        id="rfid-uid"
-                        value={rfidUidInput}
-                        onChange={(event) => setRfidUidInput(event.target.value)}
-                        placeholder="例如：DE AD BE EF"
-                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        autoComplete="off"
-                      />
-                    </div>
-
-                    <div>
-                      <label htmlFor="rfid-name" className="text-gray-500 text-xs mb-1 block">卡片名稱（可重新命名）</label>
-                      <input
-                        id="rfid-name"
-                        value={rfidNameInput}
-                        onChange={(event) => setRfidNameInput(event.target.value)}
-                        maxLength={32}
-                        placeholder="例如：主卡 / 飼主卡"
-                        className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                        autoComplete="off"
-                      />
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="submit"
-                        disabled={rfidSaving}
-                        className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
-                        style={{ backgroundColor: BLUE }}
-                      >
-                        {rfidSaving ? '儲存中…' : '儲存 UID / 名稱'}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleUseLatestScannedUid}
-                        className="text-sm font-medium px-4 py-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50"
-                      >
-                        使用最新掃描 UID
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleDisconnectRFID}
-                        disabled={!binding || rfidSaving}
-                        className="text-sm font-medium px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        中斷連線
-                      </button>
-                    </div>
-                  </form>
-
-                  {(rfidMsg || bindingError) && (
-                    <p
-                      className="text-sm"
-                      style={{
-                        color:
-                          (rfidMsg && rfidMsg.startsWith('✓'))
-                            ? '#16a34a'
-                            : '#dc2626',
-                      }}
-                    >
-                      {rfidMsg || bindingError}
-                    </p>
-                  )}
+            {tab === 'settings' && (
+              <div className="space-y-4 max-w-lg">
+                <div className="mb-2">
+                  <h2 className="text-xl font-bold text-gray-900">設定</h2>
+                  <p className="text-sm text-gray-400 mt-0.5">帳號與系統偏好設定</p>
                 </div>
 
-                {/* Link Google Account — only shown for email/password users */}
+                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">顯示模式</p>
+                  <label className="flex items-center justify-between gap-2 text-sm text-gray-700">
+                    <span>啟用 Dev Mode（顯示進階設定）</span>
+                    <input
+                      type="checkbox"
+                      checked={devMode}
+                      onChange={(event) => handleToggleDevMode(event.target.checked)}
+                    />
+                  </label>
+                  <p className="text-xs text-gray-500">關閉時會隱藏 Board、RFID、投餵/風扇進階參數。</p>
+                </div>
+
+                <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider mb-3">已登入帳號</p>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm"
+                      style={{ backgroundColor: BLUE }}
+                    >
+                      {user.email?.[0]?.toUpperCase() ?? 'U'}
+                    </div>
+                    <p className="text-gray-700 text-sm font-medium">{user.email}</p>
+                  </div>
+                </div>
+
                 {hasPasswordProvider && (
                   <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
                     <p className="text-gray-400 text-xs font-medium uppercase tracking-wider mb-3">連結 Google 帳號</p>
@@ -1358,25 +1238,26 @@ export default function Dashboard({ user }: Props) {
                       </div>
                     ) : (
                       <>
-                        <p className="text-gray-500 text-sm mb-3">
-                          將您的帳號與 Google 連結，之後可使用 Google 直接登入。
-                        </p>
+                        <p className="text-gray-500 text-sm mb-3">將您的帳號與 Google 連結，之後可使用 Google 直接登入。</p>
                         <button
                           onClick={handleLinkGoogle}
                           disabled={linkLoading}
                           className="flex items-center gap-2 font-semibold text-sm px-4 py-2.5 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                           style={{ backgroundColor: '#111827', color: '#ffffff', border: 'none' }}
-                          onMouseEnter={e => { if (!linkLoading) (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#1f2937'; }}
-                          onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#111827'; }}
+                          onMouseEnter={(event) => {
+                            if (!linkLoading) {
+                              event.currentTarget.style.backgroundColor = '#1f2937';
+                            }
+                          }}
+                          onMouseLeave={(event) => {
+                            event.currentTarget.style.backgroundColor = '#111827';
+                          }}
                         >
                           <GoogleIcon />
                           {linkLoading ? '連結中…' : '連結 Google 帳號'}
                         </button>
                         {linkMsg && (
-                          <p
-                            className="text-sm mt-2"
-                            style={{ color: linkMsg.startsWith('✓') ? '#16a34a' : '#dc2626' }}
-                          >
+                          <p className="text-sm mt-2" style={{ color: linkMsg.startsWith('✓') ? '#16a34a' : '#dc2626' }}>
                             {linkMsg}
                           </p>
                         )}
@@ -1385,25 +1266,215 @@ export default function Dashboard({ user }: Props) {
                   </div>
                 )}
 
+                {devMode ? (
+                  <>
+                    <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
+                      <p className="text-gray-400 text-xs font-medium uppercase tracking-wider mb-3">Firebase 推送間隔</p>
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div className="flex-1">
+                          <label htmlFor="poll-interval" className="text-gray-500 text-xs mb-1 block">
+                            更新頻率
+                          </label>
+                          <select
+                            id="poll-interval"
+                            value={pollIntervalMs}
+                            onChange={handlePollIntervalChange}
+                            className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                          >
+                            {POLL_INTERVAL_OPTIONS_MS.map((ms) => (
+                              <option key={ms} value={ms}>
+                                {formatPollIntervalLabel(ms)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <span
+                          className="text-white text-xs font-medium px-2.5 py-1 rounded-full self-start sm:self-auto"
+                          style={{ backgroundColor: BLUE }}
+                        >
+                          目前每 {formatPollIntervalLabel(pollIntervalMs)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
+                      <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">Board 連線</p>
+
+                      <p className="text-xs text-gray-500">
+                        目前狀態：{
+                          boardLoading
+                            ? '讀取中…'
+                            : connectedBoardId
+                              ? `已連線 ${connectedBoardId}`
+                              : '尚未連線'
+                        }
+                      </p>
+
+                      <form className="space-y-3" onSubmit={handleConnectBoard}>
+                        <div>
+                          <label htmlFor="board-id" className="text-gray-500 text-xs mb-1 block">Board ID</label>
+                          <input
+                            id="board-id"
+                            value={boardIdInput}
+                            onChange={(event) => setBoardIdInput(event.target.value)}
+                            placeholder="例如：arduino-mega-01"
+                            className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            autoComplete="off"
+                          />
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="submit"
+                            disabled={boardSaving}
+                            className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                            style={{ backgroundColor: BLUE }}
+                          >
+                            {boardSaving ? '連線中…' : '連線 Board'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleDisconnectBoard}
+                            disabled={!connectedBoardId || boardSaving}
+                            className="text-sm font-medium px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            中斷 Board
+                          </button>
+                        </div>
+                      </form>
+
+                      {(boardMsg || boardError) && (
+                        <p
+                          className="text-sm"
+                          style={{
+                            color:
+                              (boardMsg && boardMsg.startsWith('✓'))
+                                ? '#16a34a'
+                                : '#dc2626',
+                          }}
+                        >
+                          {boardMsg || boardError}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm space-y-3">
+                      <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">RFID 綁定設定</p>
+
+                      <p className="text-xs text-gray-500">
+                        目前狀態：{bindingLoading ? '讀取中…' : binding ? `已連結 ${binding.name}（${binding.uid}）` : '尚未連結'}
+                      </p>
+
+                      <form className="space-y-3" onSubmit={handleSaveRFIDBinding}>
+                        <div>
+                          <label htmlFor="rfid-uid" className="text-gray-500 text-xs mb-1 block">RFID UID</label>
+                          <input
+                            id="rfid-uid"
+                            value={rfidUidInput}
+                            onChange={(event) => setRfidUidInput(event.target.value)}
+                            placeholder="例如：DE AD BE EF"
+                            className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            autoComplete="off"
+                          />
+                        </div>
+
+                        <div>
+                          <label htmlFor="rfid-name" className="text-gray-500 text-xs mb-1 block">卡片名稱（可重新命名）</label>
+                          <input
+                            id="rfid-name"
+                            value={rfidNameInput}
+                            onChange={(event) => setRfidNameInput(event.target.value)}
+                            maxLength={32}
+                            placeholder="例如：主卡 / 飼主卡"
+                            className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            autoComplete="off"
+                          />
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="submit"
+                            disabled={rfidSaving}
+                            className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                            style={{ backgroundColor: BLUE }}
+                          >
+                            {rfidSaving ? '儲存中…' : '儲存 UID / 名稱'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleUseLatestScannedUid}
+                            className="text-sm font-medium px-4 py-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50"
+                          >
+                            使用最新掃描 UID
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleDisconnectRFID}
+                            disabled={!binding || rfidSaving}
+                            className="text-sm font-medium px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            中斷連線
+                          </button>
+                        </div>
+                      </form>
+
+                      {(rfidMsg || bindingError) && (
+                        <p
+                          className="text-sm"
+                          style={{
+                            color:
+                              (rfidMsg && rfidMsg.startsWith('✓'))
+                                ? '#16a34a'
+                                : '#dc2626',
+                          }}
+                        >
+                          {rfidMsg || bindingError}
+                        </p>
+                      )}
+
+                      {latestTapStatus && (
+                        <div
+                          className={`rounded-2xl px-3 py-2 text-xs border ${
+                            latestTapStatus.tone === 'green'
+                              ? 'bg-green-50 border-green-100 text-green-700'
+                              : latestTapStatus.tone === 'amber'
+                                ? 'bg-amber-50 border-amber-100 text-amber-700'
+                                : 'bg-red-50 border-red-100 text-red-700'
+                          }`}
+                        >
+                          {latestTapStatus.text}
+                        </div>
+                      )}
+
+                      {scansLoading && <p className="text-xs text-gray-400">讀取 RFID 紀錄中…</p>}
+                      {scansError && <p className="text-xs text-red-500">{scansError}</p>}
+                      <RFIDLog scans={scans} binding={binding} />
+                    </div>
+                  </>
+                ) : (
+                  <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 text-sm text-amber-700">
+                    進階設定已隱藏。可在上方啟用 Dev Mode 查看 Board / RFID / 推送間隔設定。
+                  </div>
+                )}
+
                 <button
                   onClick={() => signOut(auth)}
-                  className="w-full flex items-center justify-center gap-2
-                             bg-red-50 hover:bg-red-100 border border-red-200
-                             text-red-600 py-3.5 rounded-2xl text-sm font-medium transition-colors"
+                  className="w-full flex items-center justify-center gap-2 bg-red-50 hover:bg-red-100 border border-red-200 text-red-600 py-3.5 rounded-2xl text-sm font-medium transition-colors"
                 >
                   <LogOut className="w-4 h-4" />
                   登出
                 </button>
               </div>
             )}
-
           </div>
         </main>
       </div>
 
-      {/* ── Bottom Nav (mobile only) ────────────────────── */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white
-                      border-t border-gray-100 flex safe-area-pb shadow-lg">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 flex safe-area-pb shadow-lg">
         {navItems.map(({ id, Icon, label }) => (
           <button
             key={id}
