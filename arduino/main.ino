@@ -1,29 +1,13 @@
 /*************************************************************
- * COMBINED: RFID-RC522 + HC-SR04 + DHT11 + HX711 + SSD1306 OLED + ESP8266 + FAN + FEEDER MOTOR/PUMP
+ * COMBINED: HC-SR04 + DHT11 + HX711 + ESP8266 + FAN + FEEDER MOTOR/PUMP
  * TARGET: Arduino Mega 2560
  * THEME: Cyberpunk HUD  v1.4
- *
- * --- RFID RC522 WIRING ---
- *  RC522 SDA  → Mega Pin 53
- *  RC522 SCK  → Mega Pin 52
- *  RC522 MOSI → Mega Pin 51
- *  RC522 MISO → Mega Pin 50
- *  RC522 RST  → Mega Pin 49
- *  RC522 3.3V → Mega 3.3V   ← MUST be 3.3V, NOT 5V
- *  RC522 GND  → Mega GND
  *
  * --- HC-SR04 WIRING ---
  *  HC-SR04 TRIG → Mega Pin 22
  *  HC-SR04 ECHO → Mega Pin 23
  *  HC-SR04 VCC  → Mega 5V
  *  HC-SR04 GND  → Mega GND
- *
- * --- SSD1306 OLED WIRING ---
- *  OLED SDA → Mega Pin 20  (Hardware I2C — do not change)
- *  OLED SCL → Mega Pin 21  (Hardware I2C — do not change)
- *  OLED VCC → Mega 3.3V
- *  OLED GND → Mega GND
- *  Default address: 0x3C — change OLED_ADDR to 0x3D if blank
  *
  * --- DHT11 WIRING ---
  *  DHT11 DATA → Mega Pin 24
@@ -66,28 +50,10 @@
  *    - "tareWeight" / "zero" (set current bowl weight baseline to 0 g)
  *
  * LIBRARIES REQUIRED:
- *  - MFRC522 by GithubCommunity
- *  - Adafruit SSD1306
- *  - Adafruit GFX Library
  *  - DHT sensor library by Adafruit
  *  - HX711 Arduino Library
- *
- * COMBINED HUD LAYOUT (128×64):
- *  ┌─ >> SENSOR HUD ──────────── WiF─┐
- *  ├┐ DIST     │ TEMP    │ HUM      ┌┤
- *  │  124.7CM  │ 25.5°C  │ 65%      │
- *  │  ─────────────────────────────  │
- *  │  |   [████████████░░░░░]  |  |  │
- *  │         >> ZONE: NEAR           │
- *  │  FAN:50%                     ■  │
- *  └┘                               └┘
  *************************************************************/
 
-#include <SPI.h>
-#include <Wire.h>
-#include <MFRC522.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <DHT.h>
 #include <HX711.h>
 #include <EEPROM.h>
@@ -108,10 +74,6 @@
 #define ESP8266_LEGACY_TLS_WORKAROUND true  // AT 1.1.0 compatibility mode
 #define FIREBASE_AUTH     ""  // Keep empty if DB rules already allow write
 #define DEVICE_ID         "arduino-mega-01"
-
-// ── RFID Pins ─────────────────────────────────────────────
-#define PIN_RFID_SS   53
-#define PIN_RFID_RST  49
 
 // ── HC-SR04 Pins & Constants ───────────────────────────────
 const int   TRIG_PIN    = 22;
@@ -147,8 +109,6 @@ const bool FEED_PUMP_WITH_MOTOR = false; // Keep false for food-only dispenser
 const int FEED_RUN_MS_DEFAULT = 1000;
 const int FEED_RUN_MS_MIN     = 300;
 const int FEED_RUN_MS_MAX     = 5000;
-const int RFID_DISPENSE_RUN_MS = FEED_RUN_MS_DEFAULT;
-const unsigned long RFID_DISPENSE_COOLDOWN_MS = 5000UL;
 const int WATER_PUMP_RUN_MS_DEFAULT = 1500;
 const int WATER_PUMP_INTERVAL_DEFAULT_MIN = 20;
 
@@ -161,26 +121,12 @@ unsigned long waterPumpIntervalMs = (unsigned long)WATER_PUMP_INTERVAL_DEFAULT_M
 bool waterPumpCycleActive = false;
 unsigned long waterPumpCycleStartedAt = 0;
 unsigned long lastWaterPumpCycleAt = 0;
-unsigned long lastRfidDispenseAt = 0;
-
-// ── OLED Config ────────────────────────────────────────────
-#define OLED_W      128
-#define OLED_H       64
-#define OLED_RESET   -1
-#define OLED_ADDR    0x3C  // Try 0x3D if display stays blank
-
-// ── Display Modes ──────────────────────────────────────────
-#define MODE_HUD   0
-#define MODE_RFID  1
 
 // ── ESP8266 (Hardware Serial1 on Mega: RX1=pin19, TX1=pin18) ─
 #define ESP_SERIAL  Serial1
 #define ESP_BAUD    115200
 
 // ── Global Objects ─────────────────────────────────────────
-MFRC522            rfid(PIN_RFID_SS, PIN_RFID_RST);
-MFRC522::MIFARE_Key key;
-Adafruit_SSD1306   oled(OLED_W, OLED_H, &Wire, OLED_RESET);
 DHT                dht(DHT_PIN, DHT_TYPE);
 HX711              scale;
 
@@ -192,10 +138,6 @@ bool  loadCellOK          = false;
 bool  hasFoodInContainer  = false;
 float foodConsumedLastGram = 0.0;
 float foodConsumedTotalGram = 0.0;
-
-// ── RFID State ─────────────────────────────────────────────
-char               rfidUID[30]  = "";
-MFRC522::PICC_Type rfidPiccType = MFRC522::PICC_TYPE_UNKNOWN;
 
 // ── DHT State ──────────────────────────────────────────────
 float dhtTemp     = NAN;
@@ -251,16 +193,8 @@ OfflineQueueMeta offlineMeta = {};
 bool             offlineQueueEnabled = false;
 uint16_t         offlineQueueCapacity = 0;
 
-// ── OLED State ─────────────────────────────────────────────
-bool          oledOK         = false;
-byte          displayMode    = MODE_HUD;
-unsigned long rfidDisplayEnd = 0;
-const unsigned long RFID_DISPLAY_DURATION = 4000;
-
 // ── Timing ─────────────────────────────────────────────────
 unsigned long lastDistanceTime = 0;
-unsigned long lastOledTime     = 0;
-unsigned long lastBlinkTime    = 0;
 unsigned long lastDHTTime      = 0;
 unsigned long lastWeightTime   = 0;
 unsigned long lastFirebasePush = 0;
@@ -271,7 +205,6 @@ unsigned long lastWeightControlPull = 0;
 unsigned long lastOfflineStoreTime = 0;
 unsigned long lastOfflineFlushTime = 0;
 unsigned long lastReconnectAttempt = 0;
-bool          blinkState       = true;
 bool          previousWifiConnected = false;
 
 float         lastPushedDistance = NAN;
@@ -295,16 +228,11 @@ unsigned long currentDistanceInterval = 300;
 float         adaptiveDistancePrev = NAN;
 bool          adaptiveDistancePrevNoEcho = true;
 
-unsigned long lastActivityTime = 0;
-bool          oledDimmed = false;
-
 bool          espPowerSaveConfigured = false;
 bool          espPowerSaveSupported = false;
 
 const unsigned long DISTANCE_INTERVAL             = 300;
 const unsigned long DISTANCE_IDLE_INTERVAL        = 1000;
-const unsigned long OLED_INTERVAL                 = 150;
-const unsigned long BLINK_INTERVAL                = 500;
 const unsigned long DHT_INTERVAL                  = 3000;
 const unsigned long WEIGHT_INTERVAL               = 1500;
 const unsigned long FIREBASE_SENSOR_INTERVAL      = 15000;
@@ -315,7 +243,6 @@ const unsigned long FIREBASE_WEIGHT_CONTROL_INTERVAL = 5000;
 const unsigned long OFFLINE_STORE_INTERVAL         = 600000;
 const unsigned long OFFLINE_FLUSH_INTERVAL         = 2000;
 const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
-const unsigned long OLED_DIM_TIMEOUT               = 60000;
 
 const float DIST_SIGNIFICANT_CHANGE       = 5.0f;
 const float DIST_CHANGE_THRESHOLD          = 2.0f;
@@ -343,12 +270,10 @@ void setFeederMotorSpeed(int speedPercent);
 void setFeederPump(bool on);
 bool runFeederDispenseOnce(int motorRunMs);
 bool runLoadCellTare();
-bool triggerRfidDispenseOnce();
 bool sensorDataChangedSignificantly();
 void updateLastPushedSnapshot();
 void firebaseServiceWindow(unsigned long now);
 void readDistanceSmart();
-void checkOledDimming(unsigned long now);
 void serviceWaterPumpAuto(unsigned long now);
 
 
@@ -1005,29 +930,6 @@ bool runLoadCellTare() {
   firebasePushSensorLatest(true);
   return true;
 }
-
-bool triggerRfidDispenseOnce() {
-  unsigned long now = millis();
-  if (now - lastRfidDispenseAt < RFID_DISPENSE_COOLDOWN_MS) {
-    unsigned long remainingMs = RFID_DISPENSE_COOLDOWN_MS - (now - lastRfidDispenseAt);
-    Serial.print(F("[RFID FEED] Cooldown active, skip dispense. Remaining ms="));
-    Serial.println(remainingMs);
-    return false;
-  }
-
-  lastRfidDispenseAt = now;
-
-  Serial.print(F("[RFID FEED] Triggering dispense runMs="));
-  Serial.println(RFID_DISPENSE_RUN_MS);
-
-  bool ok = runFeederDispenseOnce(RFID_DISPENSE_RUN_MS);
-  if (ok) {
-    firebasePushSensorLatest(true);
-  }
-
-  return ok;
-}
-
 
 // ═══════════════════════════════════════════════════════════
 //  ESP8266: AT Command Helpers
@@ -2023,215 +1925,6 @@ bool firebasePushSensorLatest(bool forcePush) {
   return true;
 }
 
-void firebasePushRFIDScan() {
-  String payload = "{";
-  payload += "\"deviceId\":\"" DEVICE_ID "\",";
-  payload += "\"uid\":\"";
-  payload += rfidUID;
-  payload += "\",";
-  payload += "\"type\":\"";
-  payload += rfid.PICC_GetTypeName(rfidPiccType);
-  payload += "\",";
-  payload += "\"timestamp\":{\".sv\":\"timestamp\"}";
-  payload += "}";
-
-  String path = "/rfidScans.json";
-  path += firebaseAuthQuery();
-
-  Serial.println(F("[FB] Appending rfidScans entry ..."));
-  if (!espHttpJsonRequest("POST", path, payload))
-    Serial.println(F("[FB WARN] rfidScans append failed."));
-}
-
-
-// ═══════════════════════════════════════════════════════════
-//  OLED PRIMITIVES
-// ═══════════════════════════════════════════════════════════
-
-void drawHeader(const char* label) {
-  oled.fillRect(0, 0, 128, 11, SSD1306_WHITE);
-  oled.setTextColor(SSD1306_BLACK);
-  oled.setTextSize(1);
-  oled.setCursor(3, 2);
-  oled.print(label);
-  if (wifiConnected) {
-    oled.setCursor(110, 2);
-    oled.print(F("WiF"));
-  }
-  oled.setTextColor(SSD1306_WHITE);
-}
-
-void drawCorners() {
-  oled.drawFastHLine(0,   12, 7, SSD1306_WHITE);
-  oled.drawFastVLine(0,   12, 7, SSD1306_WHITE);
-  oled.drawFastHLine(121, 12, 7, SSD1306_WHITE);
-  oled.drawFastVLine(127, 12, 7, SSD1306_WHITE);
-  oled.drawFastHLine(0,   63, 7, SSD1306_WHITE);
-  oled.drawFastVLine(0,   57, 7, SSD1306_WHITE);
-  oled.drawFastHLine(121, 63, 7, SSD1306_WHITE);
-  oled.drawFastVLine(127, 57, 7, SSD1306_WHITE);
-}
-
-void drawSignalBar(float dist) {
-  const int bx = 4, by = 38, bw = 120, bh = 8;
-  oled.drawRect(bx, by, bw, bh, SSD1306_WHITE);
-
-  int filled = 0;
-  if (!noEcho && dist > 0 && dist <= 300.0)
-    filled = (int)map((long)constrain((int)dist, 1, 300), 1, 300, bw - 4, 0);
-  if (filled > 0) oled.fillRect(bx + 2, by + 2, filled, bh - 4, SSD1306_WHITE);
-
-  for (int t = bx + 24; t < bx + bw - 2; t += 24)
-    oled.drawFastVLine(t, by - 3, 3, SSD1306_WHITE);
-}
-
-const char* getZoneLabel(float dist) {
-  if (noEcho || dist < 0)  return "!! NO SIGNAL !!";
-  if (dist < 15)           return "!! CRITICAL <15CM !!";
-  if (dist < 50)           return ">> ZONE: NEAR";
-  if (dist < 120)          return ">> ZONE: MID-RANGE";
-  return                          ">> ZONE: FAR";
-}
-
-void glitchEffect() {
-  oled.invertDisplay(true);  delay(70);
-  oled.invertDisplay(false); delay(60);
-  oled.invertDisplay(true);  delay(50);
-  oled.invertDisplay(false);
-}
-
-
-// ═══════════════════════════════════════════════════════════
-//  OLED SCREEN: Combined Sensor HUD (default)
-//
-//  Pixel map:
-//   y= 0–10  Header ">> SENSOR HUD"        [WiF if connected]
-//   y=12     Corner top brackets
-//   y=12–32  Column dividers at x=44, x=87
-//   y=13     Labels:  DIST   │ TEMP   │ HUM
-//   y=23     Values:  124.7CM│ 25.5°C │ 65%
-//   y=33     Horizontal separator
-//   y=35–37  Tick marks
-//   y=38–45  Proximity signal bar
-//   y=48     Zone label (centred)
-//   y=57     FAN:XX% (left) + blinking status dot (right)
-//   y=57–63  Corner bottom brackets
-// ═══════════════════════════════════════════════════════════
-
-void displayHUD() {
-  oled.clearDisplay();
-  drawHeader(">> SENSOR HUD");
-  drawCorners();
-
-  // ── Column dividers ───────────────────────────────────
-  oled.drawFastVLine(44, 12, 21, SSD1306_WHITE);
-  oled.drawFastVLine(87, 12, 21, SSD1306_WHITE);
-
-  oled.setTextSize(1);
-
-  // ── Row 1: Labels ─────────────────────────────────────
-  oled.setCursor(2,  13); oled.print(F("DIST"));
-  oled.setCursor(46, 13); oled.print(F("TEMP"));
-  oled.setCursor(89, 13); oled.print(F("HUM"));
-
-  // ── Row 2: Live values ────────────────────────────────
-
-  // Distance
-  oled.setCursor(2, 23);
-  if (noEcho || lastDistance < 0) {
-    oled.print(F("--.-CM"));
-  } else {
-    char distStr[8];
-    dtostrf(lastDistance, 0, 1, distStr);
-    oled.print(distStr);
-    oled.print(F("CM"));
-  }
-
-  // Temperature
-  oled.setCursor(46, 23);
-  if (!dhtOK || isnan(dhtTemp)) {
-    oled.print(F("--.-"));
-    oled.write(0xF8);
-    oled.print('C');
-  } else {
-    char tempStr[7];
-    dtostrf(dhtTemp, 0, 1, tempStr);
-    oled.print(tempStr);
-    oled.write(0xF8);
-    oled.print('C');
-  }
-
-  // Humidity
-  oled.setCursor(89, 23);
-  if (!dhtOK || isnan(dhtHumidity)) {
-    oled.print(F("--%"));
-  } else {
-    oled.print((int)dhtHumidity);
-    oled.print('%');
-  }
-
-  // ── Horizontal separator ──────────────────────────────
-  oled.drawFastHLine(2, 33, 124, SSD1306_WHITE);
-
-  // ── Proximity bar ─────────────────────────────────────
-  drawSignalBar(lastDistance);
-
-  // ── Zone label (centred) ──────────────────────────────
-  const char* zone = getZoneLabel(lastDistance);
-  int16_t  bx1, by1;
-  uint16_t tw, th;
-  oled.getTextBounds(zone, 0, 0, &bx1, &by1, &tw, &th);
-  oled.setCursor((128 - (int)tw) / 2, 48);
-  oled.print(zone);
-
-  // ── Fan speed indicator (bottom-left) ─────────────────
-  oled.setCursor(4, 57);
-  oled.print(F("FAN:"));
-  oled.print(fanSpeed);
-  oled.print('%');
-
-  // ── Blinking status dot (bottom-right) ────────────────
-  if (blinkState) oled.fillRect(117, 57, 5, 5, SSD1306_WHITE);
-
-  oled.display();
-}
-
-
-// ═══════════════════════════════════════════════════════════
-//  OLED SCREEN: RFID Scan Result
-// ═══════════════════════════════════════════════════════════
-
-void displayRFID() {
-  oled.clearDisplay();
-  drawHeader(">> RFID DETECTED");
-  drawCorners();
-
-  oled.setTextSize(1);
-  oled.setCursor(4, 14); oled.print(F("UID :"));
-  oled.setCursor(4, 23);
-  oled.print(rfidUID[0] ? rfidUID : "--");
-
-  oled.setCursor(4, 33);
-  oled.print(F("TYPE:"));
-  oled.print(rfid.PICC_GetTypeName(rfidPiccType));
-
-  oled.drawFastHLine(4, 43, 120, SSD1306_WHITE);
-
-  oled.fillRect(4, 45, 120, 10, SSD1306_WHITE);
-  oled.setTextColor(SSD1306_BLACK);
-  oled.setCursor(14, 47); oled.print(F(">> ACCESS LOGGED <<"));
-  oled.setTextColor(SSD1306_WHITE);
-
-  long remaining = ((long)rfidDisplayEnd - (long)millis()) / 1000L + 1L;
-  remaining = constrain(remaining, 0L, 9L);
-  oled.setCursor(4, 56);
-  oled.print(F("RETURN IN ")); oled.print(remaining); oled.print(F("s"));
-
-  if (blinkState) oled.fillRect(117, 56, 5, 5, SSD1306_WHITE);
-  oled.display();
-}
-
-
 // ═══════════════════════════════════════════════════════════
 //  HC-SR04: Distance Reading
 // ═══════════════════════════════════════════════════════════
@@ -2269,28 +1962,6 @@ void readDistanceSmart() {
 
   adaptiveDistancePrev = lastDistance;
   adaptiveDistancePrevNoEcho = noEcho;
-}
-
-void checkOledDimming(unsigned long now) {
-  if (!oledOK) return;
-
-  bool hasActivity = (displayMode == MODE_RFID) || (!noEcho && lastDistance > 0.0f && lastDistance < 15.0f);
-
-  if (hasActivity) {
-    lastActivityTime = now;
-    if (oledDimmed) {
-      oled.dim(false);
-      oledDimmed = false;
-      Serial.println(F("[OLED] Restored brightness."));
-    }
-    return;
-  }
-
-  if (!oledDimmed && (now - lastActivityTime > OLED_DIM_TIMEOUT)) {
-    oled.dim(true);
-    oledDimmed = true;
-    Serial.println(F("[OLED] Dimmed to save power."));
-  }
 }
 
 void serviceWaterPumpAuto(unsigned long now) {
@@ -2447,52 +2118,6 @@ void readFoodWeight() {
 
 
 // ═══════════════════════════════════════════════════════════
-//  RFID: Card Reading
-// ═══════════════════════════════════════════════════════════
-
-void readRFID() {
-  Serial.println(F("------ RFID TAG DETECTED ------"));
-
-  rfidPiccType = rfid.PICC_GetType(rfid.uid.sak);
-  Serial.print(F("[TYPE] ")); Serial.println(rfid.PICC_GetTypeName(rfidPiccType));
-
-  rfidUID[0] = '\0';
-  char hexBuf[4];
-  for (byte i = 0; i < rfid.uid.size; i++) {
-    if (i > 0) strncat(rfidUID, " ", sizeof(rfidUID) - strlen(rfidUID) - 1);
-    snprintf(hexBuf, sizeof(hexBuf), "%02X", rfid.uid.uidByte[i]);
-    strncat(rfidUID, hexBuf, sizeof(rfidUID) - strlen(rfidUID) - 1);
-  }
-  Serial.print(F("[UID]  ")); Serial.println(rfidUID);
-
-  Serial.print(F("[C-ARRAY] { "));
-  for (byte i = 0; i < rfid.uid.size; i++) {
-    Serial.print(F("0x"));
-    if (rfid.uid.uidByte[i] < 0x10) Serial.print(F("0"));
-    Serial.print(rfid.uid.uidByte[i], HEX);
-    if (i < rfid.uid.size - 1) Serial.print(F(", "));
-  }
-  Serial.println(F(" }  <- paste into AUTH_UIDS[][]"));
-
-  byte gain = rfid.PCD_GetAntennaGain();
-  Serial.print(F("[GAIN] 0x")); Serial.println(gain, HEX);
-  Serial.println(F("-------------------------------\n"));
-
-  // Push RFID event to Firebase so Web App can show live history
-  firebasePushRFIDScan();
-
-  rfid.PICC_HaltA();
-  rfid.PCD_StopCrypto1();
-
-  triggerRfidDispenseOnce();
-
-  displayMode    = MODE_RFID;
-  rfidDisplayEnd = millis() + RFID_DISPLAY_DURATION;
-  if (oledOK) { glitchEffect(); displayRFID(); }
-}
-
-
-// ═══════════════════════════════════════════════════════════
 //  SETUP
 // ═══════════════════════════════════════════════════════════
 
@@ -2503,7 +2128,7 @@ void setup() {
   while (!Serial && millis() < 3000);
 
   Serial.println(F("============================================"));
-  Serial.println(F("RFID + HC-SR04 + DHT11 + HX711 + OLED + ESP + FAN + FEEDER"));
+  Serial.println(F("HC-SR04 + DHT11 + HX711 + ESP + FAN + FEEDER"));
   Serial.println(F("           CYBERPUNK HUD  v1.4              "));
   Serial.println(F("============================================"));
   Serial.println(F("[FAN] Type 0-100 and Enter to set manual fan speed."));
@@ -2541,19 +2166,6 @@ void setup() {
   Serial.print(F(" | Pump with motor="));
   Serial.println(FEED_PUMP_WITH_MOTOR ? F("ON") : F("OFF"));
 
-  // ── RFID ──────────────────────────────────────────────
-  SPI.begin();
-  rfid.PCD_Init();
-  delay(50);
-  Serial.print(F("[RFID] Firmware: "));
-  rfid.PCD_DumpVersionToSerial();
-  byte v = rfid.PCD_ReadRegister(rfid.VersionReg);
-  if (v == 0x00 || v == 0xFF)
-    Serial.println(F("[RFID FAIL] RC522 not detected — check wiring!"));
-  else
-    Serial.println(F("[RFID PASS] RC522 ready."));
-  for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF;
-
   // ── HC-SR04 ───────────────────────────────────────────
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
@@ -2583,32 +2195,6 @@ void setup() {
     Serial.println(F("[HX711 FAIL] HX711 not ready — check wiring!"));
   }
 
-  // ── OLED ──────────────────────────────────────────────
-  Wire.begin();
-  Wire.setClock(400000);
-
-  if (!oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println(F("[OLED FAIL] SSD1306 not found!"));
-    Serial.println(F("            Check SDA/SCL (pins 20/21), address, power."));
-  } else {
-    oledOK = true;
-    Serial.print(F("[OLED PASS] SSD1306 at 0x")); Serial.println(OLED_ADDR, HEX);
-
-    oled.clearDisplay();
-    drawHeader(">> SYS BOOT v1.4");
-    oled.setTextSize(1);
-    oled.setTextColor(SSD1306_WHITE);
-    oled.setCursor(4, 14); oled.print(F("> MFRC522  "));
-    oled.print((v == 0x00 || v == 0xFF) ? F("[FAIL]") : F("[OK]"));
-    oled.setCursor(4, 24); oled.print(F("> HC-SR04  [OK]"));
-    oled.setCursor(4, 34); oled.print(F("> DHT11    "));
-    oled.print(dhtOK ? F("[OK]") : F("[FAIL]"));
-    oled.setCursor(4, 44); oled.print(F("> HX711    "));
-    oled.print(loadCellOK ? F("[OK]") : F("[FAIL]"));
-    oled.setCursor(4, 54); oled.print(F("> ESP8266  INIT..."));
-    oled.display();
-  }
-
   // ── ESP8266 ───────────────────────────────────────────
   initESP8266();
   if (wifiConnected) {
@@ -2634,16 +2220,6 @@ void setup() {
     lastFirebasePush = millis();
   }
 
-  if (oledOK) {
-    oled.fillRect(4, 54, 124, 10, SSD1306_BLACK);
-    oled.setCursor(4, 54);
-    oled.print(F("> ESP8266  "));
-    oled.print(wifiConnected ? F("[OK] WIFI ON") : F("[WARN] NO WIFI"));
-    oled.display();
-    delay(2000);
-    Serial.println(F("[OLED] Boot splash done. HUD active.\n"));
-  }
-
   lastDHTTime = millis();
   lastWeightTime = millis();
   lastWaterPumpCycleAt = millis();
@@ -2654,8 +2230,6 @@ void setup() {
   lastOfflineFlushTime = millis();
   lastReconnectAttempt = millis();
   currentDistanceInterval = DISTANCE_INTERVAL;
-  lastActivityTime = millis();
-  oledDimmed = false;
   previousWifiConnected = wifiConnected;
 }
 
@@ -2685,12 +2259,6 @@ void loop() {
   }
 
   attemptWiFiReconnect(now);
-
-  // ── Blink ticker ───────────────────────────────────────
-  if (now - lastBlinkTime >= BLINK_INTERVAL) {
-    lastBlinkTime = now;
-    blinkState    = !blinkState;
-  }
 
   // ── Serial commands (fan + feeder diagnostics) ─────────
   checkSerialCommandInput();
@@ -2725,21 +2293,4 @@ void loop() {
   // ── Flush buffered samples to Firebase when online ──────
   flushOfflineQueueIfDue(now);
 
-  // ── RFID check ─────────────────────────────────────────
-  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    readRFID();
-    return;
-  }
-
-  // ── Auto-revert to HUD after RFID display timer ────────
-  if (displayMode == MODE_RFID && now >= rfidDisplayEnd)
-    displayMode = MODE_HUD;
-
-  // ── OLED refresh ───────────────────────────────────────
-  checkOledDimming(now);
-  if (oledOK && (now - lastOledTime >= OLED_INTERVAL)) {
-    lastOledTime = now;
-    if (displayMode == MODE_RFID) displayRFID();
-    else                          displayHUD();
-  }
 }
