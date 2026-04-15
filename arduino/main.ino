@@ -130,12 +130,17 @@ const unsigned long RFID_DISPENSE_COOLDOWN_MS = 5000UL;
 const int WATER_PUMP_RUN_MS_DEFAULT = 1500;
 const int WATER_PUMP_INTERVAL_DEFAULT_MIN = 20;
 
+const int WATER_PUMP_MODE_AUTO = 0;
+const int WATER_PUMP_MODE_ALWAYS_ON = 1;
+const int WATER_PUMP_MODE_ALWAYS_OFF = 2;
+
 int  feederMotorSpeed = 0;   // -100..100
 bool feederPumpOn = false;
 char lastFeedingRequestId[48] = "";
 char lastWeightTareRequestId[48] = "";
 int  waterPumpIntervalMin = WATER_PUMP_INTERVAL_DEFAULT_MIN;
 unsigned long waterPumpIntervalMs = (unsigned long)WATER_PUMP_INTERVAL_DEFAULT_MIN * 60UL * 1000UL;
+int  waterPumpMode = WATER_PUMP_MODE_AUTO;
 bool waterPumpCycleActive = false;
 unsigned long waterPumpCycleStartedAt = 0;
 unsigned long lastWaterPumpCycleAt = 0;
@@ -242,6 +247,7 @@ float         lastPushedFanAutoThresholdC = NAN;
 float         lastPushedFoodConsumedLast = NAN;
 float         lastPushedFoodConsumedTotal = NAN;
 int           lastPushedWaterPumpIntervalMin = -1;
+int           lastPushedWaterPumpMode = -1;
 bool          lastPushedNoEcho = true;
 bool          lastPushedHasFood = false;
 bool          lastPushedFanManualOn = false;
@@ -277,6 +283,7 @@ const float WEIGHT_CHANGE_THRESHOLD        = 5.0f;
 const float FAN_THRESHOLD_CHANGE_THRESHOLD = 0.2f;
 const float FOOD_CONSUMED_CHANGE_THRESHOLD = 0.1f;
 const float FOOD_CONSUMED_MIN_DELTA_G      = 0.2f;
+const float FOOD_CONSUMED_DISTANCE_MAX_CM  = 25.0f;
 
 // Forward declarations used before concrete definitions.
 void configureESP8266SSL();
@@ -291,6 +298,9 @@ bool espHttpJsonRequest(const char* method, const String& path, const String& pa
                         String* responseOut = NULL);
 bool isSignedIntegerString(const String& input);
 int sanitizeWaterPumpIntervalMin(int value);
+int sanitizeWaterPumpMode(int value);
+int parseWaterPumpModeText(const String& value, int fallbackMode);
+const char* waterPumpModeToText(int mode);
 void setFeederMotorSpeed(int speedPercent);
 void setFeederPump(bool on);
 bool runFeederDispenseOnce(int motorRunMs);
@@ -348,6 +358,7 @@ void updateLastPushedSnapshot() {
   lastPushedFoodConsumedLast = foodConsumedLastGram;
   lastPushedFoodConsumedTotal = foodConsumedTotalGram;
   lastPushedWaterPumpIntervalMin = waterPumpIntervalMin;
+  lastPushedWaterPumpMode = waterPumpMode;
   lastPushedNoEcho = noEcho;
   lastPushedHasFood = hasFoodInContainer;
   lastPushedFanManualOn = fanManualOn;
@@ -369,6 +380,7 @@ bool sensorDataChangedSignificantly() {
   if (lastPushedFanSpeed != fanSpeed) return true;
   if (lastPushedFanManualPercent != fanManualPercent) return true;
   if (lastPushedWaterPumpIntervalMin != waterPumpIntervalMin) return true;
+  if (lastPushedWaterPumpMode != waterPumpMode) return true;
 
   if (floatChangedBeyondThreshold(lastDistance, lastPushedDistance, DIST_CHANGE_THRESHOLD)) return true;
   if (floatChangedBeyondThreshold(dhtTemp, lastPushedTemp, TEMP_CHANGE_THRESHOLD)) return true;
@@ -1505,6 +1517,37 @@ int sanitizeWaterPumpIntervalMin(int value) {
   return rounded;
 }
 
+int sanitizeWaterPumpMode(int value) {
+  if (value == WATER_PUMP_MODE_ALWAYS_ON) return WATER_PUMP_MODE_ALWAYS_ON;
+  if (value == WATER_PUMP_MODE_ALWAYS_OFF) return WATER_PUMP_MODE_ALWAYS_OFF;
+  return WATER_PUMP_MODE_AUTO;
+}
+
+int parseWaterPumpModeText(const String& value, int fallbackMode) {
+  String normalized = value;
+  normalized.trim();
+  normalized.toLowerCase();
+
+  if (normalized == "auto") {
+    return WATER_PUMP_MODE_AUTO;
+  }
+  if (normalized == "always_on" || normalized == "on" || normalized == "alwayson") {
+    return WATER_PUMP_MODE_ALWAYS_ON;
+  }
+  if (normalized == "always_off" || normalized == "off" || normalized == "alwaysoff") {
+    return WATER_PUMP_MODE_ALWAYS_OFF;
+  }
+
+  return fallbackMode;
+}
+
+const char* waterPumpModeToText(int mode) {
+  int safeMode = sanitizeWaterPumpMode(mode);
+  if (safeMode == WATER_PUMP_MODE_ALWAYS_ON) return "always_on";
+  if (safeMode == WATER_PUMP_MODE_ALWAYS_OFF) return "always_off";
+  return "auto";
+}
+
 bool firebasePullFanSettings() {
   const char* settingsPaths[] = {
     "/sensors/fanSettings.json",  // preferred shared path
@@ -1853,35 +1896,66 @@ bool firebasePullFeedingSettings() {
   }
 
   int nextInterval = waterPumpIntervalMin;
-  bool parsed = false;
+  int nextMode = waterPumpMode;
+  bool parsedInterval = false;
   float floatValue;
 
   if (jsonReadFloat(body, "waterPumpIntervalMin", &floatValue)) {
     nextInterval = (int)(floatValue + (floatValue >= 0 ? 0.5f : -0.5f));
-    parsed = true;
+    parsedInterval = true;
   } else {
     String intervalText;
     if (jsonReadString(body, "waterPumpIntervalMin", &intervalText)) {
       intervalText.trim();
       if (isSignedIntegerString(intervalText)) {
         nextInterval = intervalText.toInt();
-        parsed = true;
+        parsedInterval = true;
       }
     }
   }
 
-  if (!parsed) {
-    return false;
+  if (parsedInterval) {
+    nextInterval = sanitizeWaterPumpIntervalMin(nextInterval);
+    if (waterPumpIntervalMin != nextInterval) {
+      waterPumpIntervalMin = nextInterval;
+      waterPumpIntervalMs = (unsigned long)waterPumpIntervalMin * 60UL * 1000UL;
+
+      Serial.print(F("[WATER] Pump interval updated to "));
+      Serial.print(waterPumpIntervalMin);
+      Serial.println(F(" min"));
+    }
   }
 
-  nextInterval = sanitizeWaterPumpIntervalMin(nextInterval);
-  if (waterPumpIntervalMin != nextInterval) {
-    waterPumpIntervalMin = nextInterval;
-    waterPumpIntervalMs = (unsigned long)waterPumpIntervalMin * 60UL * 1000UL;
+  bool parsedMode = false;
+  if (jsonReadFloat(body, "waterPumpMode", &floatValue)) {
+    nextMode = sanitizeWaterPumpMode((int)(floatValue + (floatValue >= 0 ? 0.5f : -0.5f)));
+    parsedMode = true;
+  } else {
+    String modeText;
+    if (jsonReadString(body, "waterPumpMode", &modeText)) {
+      int parsedByText = parseWaterPumpModeText(modeText, -1);
+      if (parsedByText >= 0) {
+        nextMode = sanitizeWaterPumpMode(parsedByText);
+        parsedMode = true;
+      } else {
+        modeText.trim();
+        if (isSignedIntegerString(modeText)) {
+          nextMode = sanitizeWaterPumpMode(modeText.toInt());
+          parsedMode = true;
+        }
+      }
+    }
+  }
 
-    Serial.print(F("[WATER] Pump interval updated to "));
-    Serial.print(waterPumpIntervalMin);
-    Serial.println(F(" min"));
+  if (parsedMode && waterPumpMode != nextMode) {
+    waterPumpMode = nextMode;
+
+    Serial.print(F("[WATER] Pump mode updated to "));
+    Serial.println(waterPumpModeToText(waterPumpMode));
+  }
+
+  if (!parsedInterval && !parsedMode) {
+    return false;
   }
 
   return true;
@@ -1942,6 +2016,7 @@ bool firebasePushSensorLatest(bool forcePush) {
            "\"fcl\":%s,"
            "\"fct\":%s,"
            "\"wpi\":%d,"
+           "\"wpm\":\"%s\","
            "\"ts\":{\".sv\":\"timestamp\"}"
            "}",
            DEVICE_ID,
@@ -1959,7 +2034,8 @@ bool firebasePushSensorLatest(bool forcePush) {
            fanAutoTriggered ? "true" : "false",
            foodConsumedLastBuf,
            foodConsumedTotalBuf,
-           waterPumpIntervalMin);
+           waterPumpIntervalMin,
+           waterPumpModeToText(waterPumpMode));
 
   String path = "/sensors/latest.json";
   path += firebaseAuthQuery();
@@ -2035,6 +2111,26 @@ void readDistanceSmart() {
 }
 
 void serviceWaterPumpAuto(unsigned long now) {
+  if (waterPumpMode == WATER_PUMP_MODE_ALWAYS_ON) {
+    if (!feederPumpOn) {
+      setFeederPump(true);
+      waterPumpCycleActive = false;
+      Serial.println(F("[WATER] Pump forced ON (dev mode)."));
+      firebasePushSensorLatest(true);
+    }
+    return;
+  }
+
+  if (waterPumpMode == WATER_PUMP_MODE_ALWAYS_OFF) {
+    if (feederPumpOn || waterPumpCycleActive) {
+      setFeederPump(false);
+      waterPumpCycleActive = false;
+      Serial.println(F("[WATER] Pump forced OFF (dev mode)."));
+      firebasePushSensorLatest(true);
+    }
+    return;
+  }
+
   if (waterPumpCycleActive) {
     if (now - waterPumpCycleStartedAt >= (unsigned long)WATER_PUMP_RUN_MS_DEFAULT) {
       setFeederPump(false);
@@ -2163,7 +2259,8 @@ void readFoodWeight() {
   float consumed = 0.0f;
   if (isFiniteFloat(lastValidWeight)) {
     float delta = lastValidWeight - foodWeightGram;
-    if (delta >= FOOD_CONSUMED_MIN_DELTA_G) {
+    bool withinDistanceGate = (!noEcho && lastDistance >= 0.0f && lastDistance <= FOOD_CONSUMED_DISTANCE_MAX_CM);
+    if (withinDistanceGate && delta >= FOOD_CONSUMED_MIN_DELTA_G) {
       consumed = delta;
       foodConsumedTotalGram += consumed;
       if (foodConsumedTotalGram < 0.0f) {
@@ -2174,6 +2271,10 @@ void readFoodWeight() {
       Serial.print(F(" g | Total: "));
       Serial.print(foodConsumedTotalGram, 1);
       Serial.println(F(" g"));
+    } else if (!withinDistanceGate && delta >= FOOD_CONSUMED_MIN_DELTA_G) {
+      Serial.print(F("[HX711] Skip consumed calc: distance gate not met (<= "));
+      Serial.print(FOOD_CONSUMED_DISTANCE_MAX_CM, 0);
+      Serial.println(F(" cm)."));
     }
   }
 

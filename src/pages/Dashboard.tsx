@@ -126,6 +126,7 @@ export default function Dashboard({ user }: Props) {
   const [feedingMotorRunMsInput, setFeedingMotorRunMsInput] = useState(1000);
   const [feedingThresholdInput, setFeedingThresholdInput] = useState(2);
   const [waterPumpIntervalMinInput, setWaterPumpIntervalMinInput] = useState(20);
+  const [waterPumpModeInput, setWaterPumpModeInput] = useState<'auto' | 'always_on' | 'always_off'>('auto');
   const [feedingConfirmationInput, setFeedingConfirmationInput] = useState(4500);
   const [feedingRetryDelayInput, setFeedingRetryDelayInput] = useState(1200);
   const [feedingMaxAttemptsInput, setFeedingMaxAttemptsInput] = useState(3);
@@ -193,7 +194,9 @@ export default function Dashboard({ user }: Props) {
     error: dailyConsumedError,
   } = useDailyFoodConsumption(
     user.uid,
-    data?.foodConsumedTotalG ?? null,
+    data?.weight ?? null,
+    data?.distance ?? null,
+    Boolean(data?.noEcho),
     feedingSettings.timezone,
     pollIntervalMs,
   );
@@ -249,6 +252,7 @@ export default function Dashboard({ user }: Props) {
     setFeedingMotorRunMsInput(feedingSettings.motorRunMs);
     setFeedingThresholdInput(feedingSettings.weightDeltaThresholdG);
     setWaterPumpIntervalMinInput(feedingSettings.waterPumpIntervalMin);
+    setWaterPumpModeInput(feedingSettings.waterPumpMode);
     setFeedingConfirmationInput(feedingSettings.confirmationTimeoutMs);
     setFeedingRetryDelayInput(feedingSettings.retryDelayMs);
     setFeedingMaxAttemptsInput(feedingSettings.maxAttempts);
@@ -451,6 +455,7 @@ export default function Dashboard({ user }: Props) {
         motorRunMs: feedingMotorRunMsInput,
         weightDeltaThresholdG: feedingThresholdInput,
         waterPumpIntervalMin: waterPumpIntervalMinInput,
+        waterPumpMode: waterPumpModeInput,
         confirmationTimeoutMs: feedingConfirmationInput,
         retryDelayMs: feedingRetryDelayInput,
         maxAttempts: feedingMaxAttemptsInput,
@@ -900,11 +905,45 @@ export default function Dashboard({ user }: Props) {
                           </option>
                         ))}
                       </select>
+                      {devMode && waterPumpModeInput !== 'auto' && (
+                        <p className="text-xs text-amber-600 mt-1">目前為強制模式，排程補水頻率暫不生效。</p>
+                      )}
                     </div>
 
                     {devMode && (
                       <div className="rounded-2xl border border-gray-100 bg-gray-50 p-3 space-y-3">
                         <p className="text-xs text-gray-500 font-medium">進階設定（Dev Mode）</p>
+                        <div>
+                          <p className="text-gray-500 text-xs mb-1">水泵模式</p>
+                          <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 gap-1">
+                            {[
+                              { value: 'auto', label: '自動' },
+                              { value: 'always_on', label: '常開' },
+                              { value: 'always_off', label: '常關' },
+                            ].map((item) => {
+                              const active = waterPumpModeInput === item.value;
+                              return (
+                                <button
+                                  key={item.value}
+                                  type="button"
+                                  onClick={() => {
+                                    setWaterPumpModeInput(item.value as 'auto' | 'always_on' | 'always_off');
+                                    setFeedingFormDirty(true);
+                                  }}
+                                  disabled={feedingSettingsSaving}
+                                  className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                                    active ? 'text-white' : 'text-gray-600 hover:bg-gray-50'
+                                  }`}
+                                  style={active ? { backgroundColor: BLUE } : undefined}
+                                >
+                                  {item.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">常開/常關為開發測試用途，會覆蓋自動補水循環。</p>
+                        </div>
+
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
                             <label htmlFor="feeding-motor-ms" className="text-gray-500 text-xs mb-1 block">

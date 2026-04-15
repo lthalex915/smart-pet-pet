@@ -21,6 +21,7 @@ type RawSensorData = Partial<SensorData> & {
   fcl?: unknown;
   fct?: unknown;
   wpi?: unknown;
+  wpm?: unknown;
   hf?: unknown;
   f?: unknown;
   fmo?: unknown;
@@ -37,6 +38,19 @@ function asFiniteNumber(value: unknown): number | null {
 
 function asBooleanOrNull(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
+}
+
+function normalizeWaterPumpMode(value: unknown): SensorData['waterPumpMode'] | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'auto' || normalized === 'always_on' || normalized === 'always_off') {
+    return normalized;
+  }
+
+  return undefined;
 }
 
 function asNonNegativeNumber(value: unknown): number | null {
@@ -79,6 +93,7 @@ function normalizeSensorData(value: SensorData | null): SensorData | null {
   const waterPumpIntervalMin = waterPumpIntervalMinRaw == null
     ? undefined
     : Math.max(15, Math.min(30, Math.round(waterPumpIntervalMinRaw / 5) * 5));
+  const waterPumpMode = normalizeWaterPumpMode(raw.waterPumpMode) ?? normalizeWaterPumpMode(raw.wpm);
   const hasFood = asBooleanOrNull(raw.hasFood) ?? asBooleanOrNull(raw.hf) ?? false;
   const fanSpeed = asFiniteNumber(raw.fanSpeed) ?? asFiniteNumber(raw.f);
   const fanManualOn = asBooleanOrNull(raw.fanManualOn) ?? asBooleanOrNull(raw.fmo);
@@ -98,6 +113,7 @@ function normalizeSensorData(value: SensorData | null): SensorData | null {
     foodConsumedLastG: foodConsumedLastG ?? undefined,
     foodConsumedTotalG: foodConsumedTotalG ?? undefined,
     waterPumpIntervalMin,
+    waterPumpMode,
     hasFood,
     fanSpeed: fanSpeed ?? undefined,
     fanManualOn: fanManualOn ?? undefined,

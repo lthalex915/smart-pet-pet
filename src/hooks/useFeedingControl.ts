@@ -41,6 +41,7 @@ export const DEFAULT_FEEDING_SETTINGS: FeedingSettings = {
   motorRunMs: 1_000,
   weightDeltaThresholdG: 2,
   waterPumpIntervalMin: 20,
+  waterPumpMode: 'auto',
   confirmationTimeoutMs: 4_500,
   retryDelayMs: 1_200,
   maxAttempts: 3,
@@ -138,6 +139,19 @@ function normalizeTimezone(value: unknown): string {
   }
 }
 
+function normalizeWaterPumpMode(value: unknown): FeedingSettings['waterPumpMode'] {
+  if (typeof value !== 'string') {
+    return DEFAULT_FEEDING_SETTINGS.waterPumpMode;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'auto' || normalized === 'always_on' || normalized === 'always_off') {
+    return normalized;
+  }
+
+  return DEFAULT_FEEDING_SETTINGS.waterPumpMode;
+}
+
 function normalizeFeedingSettings(value: Partial<FeedingSettings> | null | undefined): FeedingSettings {
   const motorRunMs = typeof value?.motorRunMs === 'number'
     ? value.motorRunMs
@@ -159,6 +173,8 @@ function normalizeFeedingSettings(value: Partial<FeedingSettings> | null | undef
     ? Math.round(waterPumpIntervalMinRaw)
     : DEFAULT_FEEDING_SETTINGS.waterPumpIntervalMin;
 
+  const waterPumpMode = normalizeWaterPumpMode(value?.waterPumpMode);
+
   const retryDelayMs = typeof value?.retryDelayMs === 'number'
     ? value.retryDelayMs
     : DEFAULT_FEEDING_SETTINGS.retryDelayMs;
@@ -177,6 +193,7 @@ function normalizeFeedingSettings(value: Partial<FeedingSettings> | null | undef
     motorRunMs: clampInt(motorRunMs, 300, 5_000),
     weightDeltaThresholdG: Number(clampFloat(weightDeltaThresholdG, 0.5, 50).toFixed(1)),
     waterPumpIntervalMin,
+    waterPumpMode,
     confirmationTimeoutMs: clampInt(confirmationTimeoutMs, 1_000, 20_000),
     retryDelayMs: clampInt(retryDelayMs, 400, 10_000),
     maxAttempts: clampInt(maxAttempts, 1, 5),

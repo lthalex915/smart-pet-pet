@@ -9,13 +9,18 @@ import {
 
 interface ConsumptionState {
   dateKey: string;
-  dayStartTotalG: number;
+  todayConsumedG: number;
+  lastWeightG: number | null;
 }
 
 interface RawConsumptionState {
   dateKey?: unknown;
   dayStartTotalG?: unknown;
+  todayConsumedG?: unknown;
+  lastWeightG?: unknown;
 }
+
+const FOOD_CONSUMED_DISTANCE_GATE_CM = 25;
 
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value)
@@ -34,15 +39,17 @@ function normalizeState(value: unknown): ConsumptionState | null {
 
   const raw = value as RawConsumptionState;
   const dateKey = typeof raw.dateKey === 'string' ? raw.dateKey.trim() : '';
-  const dayStartTotalG = toFiniteNumber(raw.dayStartTotalG);
+  const todayConsumedRaw = toFiniteNumber(raw.todayConsumedG);
+  const lastWeightRaw = toFiniteNumber(raw.lastWeightG);
 
-  if (!dateKey || dayStartTotalG == null) {
+  if (!dateKey) {
     return null;
   }
 
   return {
     dateKey,
-    dayStartTotalG: toNonNegativeRounded(dayStartTotalG),
+    todayConsumedG: toNonNegativeRounded(todayConsumedRaw ?? 0),
+    lastWeightG: lastWeightRaw == null ? null : toNonNegativeRounded(lastWeightRaw),
   };
 }
 
@@ -67,7 +74,9 @@ async function getSafe<T>(promise: Promise<T>): Promise<T | null> {
 
 export function useDailyFoodConsumption(
   uid: string | null | undefined,
-  totalConsumedG: number | null | undefined,
+  weightG: number | null | undefined,
+  distanceCm: number | null | undefined,
+  noEcho: boolean,
   timezone: string,
   pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS,
 ) {
@@ -87,9 +96,14 @@ export function useDailyFoodConsumption(
   );
 
   const refresh = useCallback(async () => {
-    const total = toFiniteNumber(totalConsumedG);
+    const currentWeight = toFiniteNumber(weightG);
+    const currentDistance = toFiniteNumber(distanceCm);
+    const canCountConsumption = !noEcho
+      && currentDistance != null
+      && currentDistance >= 0
+      && currentDistance <= FOOD_CONSUMED_DISTANCE_GATE_CM;
 
-    if (total == null) {
+    if (currentWeight == null) {
       setTodayConsumedG(null);
       setLoading(false);
       return;
@@ -103,7 +117,7 @@ export function useDailyFoodConsumption(
 
     try {
       const dateKey = getDateKeyInTimezone(timezone || 'Asia/Hong_Kong');
-      const totalRounded = toNonNegativeRounded(total);
+      const currentWeightRounded = toNonNegativeRounded(currentWeight);
 
       const [userSnapshot, legacySnapshot] = await Promise.all([
         userConsumptionRef ? getSafe(get(userConsumptionRef)) : Promise.resolve(null),
@@ -118,22 +132,29 @@ export function useDailyFoodConsumption(
 
       const stored = normalizeState(source?.val());
 
-      let dayStartTotal = stored?.dayStartTotalG ?? totalRounded;
-      let shouldWrite = stored == null || stored.dateKey !== dateKey;
+      const isSameDay = stored?.dateKey === dateKey;
+      const previousWeight = isSameDay ? stored?.lastWeightG ?? null : null;
+      let nextTodayConsumed = isSameDay ? stored?.todayConsumedG ?? 0 : 0;
 
-      if (totalRounded < dayStartTotal) {
-        dayStartTotal = totalRounded;
-        shouldWrite = true;
+      if (canCountConsumption && previousWeight != null && currentWeightRounded < previousWeight) {
+        nextTodayConsumed += previousWeight - currentWeightRounded;
       }
 
-      if (shouldWrite) {
-        const payload = {
-          dateKey,
-          dayStartTotalG: dayStartTotal,
-          timezone: timezone || 'Asia/Hong_Kong',
-          updatedAt: Date.now(),
-        };
+      nextTodayConsumed = toNonNegativeRounded(nextTodayConsumed);
 
+      const payload = {
+        dateKey,
+        todayConsumedG: nextTodayConsumed,
+        lastWeightG: currentWeightRounded,
+        timezone: timezone || 'Asia/Hong_Kong',
+        updatedAt: Date.now(),
+      };
+
+      const shouldWrite = !isSameDay
+        || previousWeight !== currentWeightRounded
+        || Math.abs((stored?.todayConsumedG ?? 0) - nextTodayConsumed) > 0.0001;
+
+      if (shouldWrite) {
         if (userConsumptionRef) {
           await set(userConsumptionRef, payload);
         } else {
@@ -141,18 +162,16 @@ export function useDailyFoodConsumption(
         }
       }
 
-      const consumedToday = toNonNegativeRounded(totalRounded - dayStartTotal);
-      setTodayConsumedG(consumedToday);
+      setTodayConsumedG(nextTodayConsumed);
       setError(null);
     } catch (err: unknown) {
-      const fallbackTotal = toFiniteNumber(totalConsumedG);
-      setTodayConsumedG(fallbackTotal == null ? null : toNonNegativeRounded(fallbackTotal));
+      setTodayConsumedG(null);
       setError(err instanceof Error ? err.message : '讀取本日食用量失敗');
     } finally {
       setLoading(false);
       inFlightRef.current = false;
     }
-  }, [legacyConsumptionRef, timezone, totalConsumedG, userConsumptionRef]);
+  }, [distanceCm, legacyConsumptionRef, noEcho, timezone, userConsumptionRef, weightG]);
 
   useEffect(() => {
     void refresh();

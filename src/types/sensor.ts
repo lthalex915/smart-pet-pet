@@ -1,3 +1,5 @@
+export type WaterPumpMode = 'auto' | 'always_on' | 'always_off';
+
 export interface SensorData {
   deviceId: string;
   distance: number | null;
@@ -8,6 +10,7 @@ export interface SensorData {
   foodConsumedLastG?: number;
   foodConsumedTotalG?: number;
   waterPumpIntervalMin?: number;
+  waterPumpMode?: WaterPumpMode;
   hasFood: boolean;
   fanSpeed?: number;
   fanManualOn?: boolean;
@@ -36,6 +39,7 @@ export interface FeedingSettings {
   motorRunMs: number;
   weightDeltaThresholdG: number;
   waterPumpIntervalMin: number;
+  waterPumpMode: WaterPumpMode;
   confirmationTimeoutMs: number;
   retryDelayMs: number;
   maxAttempts: number;
