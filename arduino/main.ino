@@ -55,7 +55,7 @@
  *  IRLZ44N GATE→ Mega Pin 10 (Pump MOSFET)
  *  Command source: Firebase /sensors/feeding/command and /sensors/weight/command
  *  Supported actions:
- *    - "dispenseOnce" (motorRunMs: 300~5000 ms)
+ *    - "dispenseOnce" (fixed: 3000 ms at +100 speed)
  *    - "tareWeight" / "zero" (set current bowl weight baseline to 0 g)
  *
  * LIBRARIES REQUIRED:
@@ -120,11 +120,12 @@ const int FEED_MOTOR_ENA_PIN = 12;      // L298N ENA (PWM speed)
 const int FEED_MOTOR_IN1_PIN = 7;       // L298N IN1 (direction)
 const int FEED_MOTOR_IN2_PIN = 11;      // L298N IN2 (direction)
 const int FEED_PUMP_PIN      = 10;      // IRLZ44N gate (optional pump)
+const int FEED_IDLE_SPEED_PERCENT = -100;
 const int FEED_DISPENSE_SPEED_PERCENT = 100;
 const bool FEED_PUMP_WITH_MOTOR = false; // Keep false for food-only dispenser
-const int FEED_RUN_MS_DEFAULT = 1000;
-const int FEED_RUN_MS_MIN     = 300;
-const int FEED_RUN_MS_MAX     = 5000;
+const int FEED_RUN_MS_DEFAULT = 3000;
+const int FEED_RUN_MS_MIN     = 3000;
+const int FEED_RUN_MS_MAX     = 3000;
 const int RFID_DISPENSE_RUN_MS = FEED_RUN_MS_DEFAULT;
 const unsigned long RFID_DISPENSE_COOLDOWN_MS = 5000UL;
 const int WATER_PUMP_RUN_MS_DEFAULT = 1500;
@@ -134,7 +135,7 @@ const int WATER_PUMP_MODE_AUTO = 0;
 const int WATER_PUMP_MODE_ALWAYS_ON = 1;
 const int WATER_PUMP_MODE_ALWAYS_OFF = 2;
 
-int  feederMotorSpeed = 0;   // -100..100
+int  feederMotorSpeed = FEED_IDLE_SPEED_PERCENT;   // -100..100
 bool feederPumpOn = false;
 char lastFeedingRequestId[48] = "";
 char lastWeightTareRequestId[48] = "";
@@ -925,6 +926,9 @@ bool runFeederDispenseOnce(int motorRunMs) {
   Serial.print(F("[FEED] Dispense start | runMs="));
   Serial.println(safeRunMs);
 
+  setFeederMotorSpeed(FEED_IDLE_SPEED_PERCENT);
+  delay(50);
+
   setFeederMotorSpeed(FEED_DISPENSE_SPEED_PERCENT);
   if (FEED_PUMP_WITH_MOTOR) {
     setFeederPump(true);
@@ -936,7 +940,7 @@ bool runFeederDispenseOnce(int motorRunMs) {
     delay(50);
   }
 
-  setFeederMotorSpeed(0);
+  setFeederMotorSpeed(FEED_IDLE_SPEED_PERCENT);
   if (FEED_PUMP_WITH_MOTOR) {
     setFeederPump(false);
   }
@@ -2365,8 +2369,9 @@ void setup() {
   digitalWrite(FEED_MOTOR_IN2_PIN, LOW);
   analogWrite(FEED_MOTOR_ENA_PIN, 0);
   digitalWrite(FEED_PUMP_PIN, LOW);
-  feederMotorSpeed = 0;
+  feederMotorSpeed = FEED_IDLE_SPEED_PERCENT;
   feederPumpOn = false;
+  setFeederMotorSpeed(FEED_IDLE_SPEED_PERCENT);
 
   Serial.print(F("[FEED] Motor ready on ENA="));
   Serial.print(FEED_MOTOR_ENA_PIN);
