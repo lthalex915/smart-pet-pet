@@ -1,7 +1,16 @@
 /*************************************************************
- * COMBINED: HC-SR04 + DHT11 + HX711 + ESP8266 + FAN + FEEDER MOTOR/PUMP
+ * COMBINED: RFID-RC522 + HC-SR04 + DHT11 + HX711 + ESP8266 + FAN + FEEDER MOTOR/PUMP
  * TARGET: Arduino Mega 2560
  * THEME: Cyberpunk HUD  v1.4
+ *
+ * --- RFID RC522 WIRING ---
+ *  RC522 SDA  → Mega Pin 53
+ *  RC522 SCK  → Mega Pin 52
+ *  RC522 MOSI → Mega Pin 51
+ *  RC522 MISO → Mega Pin 50
+ *  RC522 RST  → Mega Pin 49
+ *  RC522 3.3V → Mega 3.3V   ← MUST be 3.3V, NOT 5V
+ *  RC522 GND  → Mega GND
  *
  * --- HC-SR04 WIRING ---
  *  HC-SR04 TRIG → Mega Pin 22
@@ -50,10 +59,13 @@
  *    - "tareWeight" / "zero" (set current bowl weight baseline to 0 g)
  *
  * LIBRARIES REQUIRED:
+ *  - MFRC522 by GithubCommunity
  *  - DHT sensor library by Adafruit
  *  - HX711 Arduino Library
  *************************************************************/
 
+#include <SPI.h>
+#include <MFRC522.h>
 #include <DHT.h>
 #include <HX711.h>
 #include <EEPROM.h>
@@ -74,6 +86,10 @@
 #define ESP8266_LEGACY_TLS_WORKAROUND true  // AT 1.1.0 compatibility mode
 #define FIREBASE_AUTH     ""  // Keep empty if DB rules already allow write
 #define DEVICE_ID         "arduino-mega-01"
+
+// ── RFID Pins ─────────────────────────────────────────────
+#define PIN_RFID_SS   53
+#define PIN_RFID_RST  49
 
 // ── HC-SR04 Pins & Constants ───────────────────────────────
 const int   TRIG_PIN    = 22;
@@ -109,6 +125,8 @@ const bool FEED_PUMP_WITH_MOTOR = false; // Keep false for food-only dispenser
 const int FEED_RUN_MS_DEFAULT = 1000;
 const int FEED_RUN_MS_MIN     = 300;
 const int FEED_RUN_MS_MAX     = 5000;
+const int RFID_DISPENSE_RUN_MS = FEED_RUN_MS_DEFAULT;
+const unsigned long RFID_DISPENSE_COOLDOWN_MS = 5000UL;
 const int WATER_PUMP_RUN_MS_DEFAULT = 1500;
 const int WATER_PUMP_INTERVAL_DEFAULT_MIN = 20;
 
@@ -121,12 +139,15 @@ unsigned long waterPumpIntervalMs = (unsigned long)WATER_PUMP_INTERVAL_DEFAULT_M
 bool waterPumpCycleActive = false;
 unsigned long waterPumpCycleStartedAt = 0;
 unsigned long lastWaterPumpCycleAt = 0;
+unsigned long lastRfidDispenseAt = 0;
 
 // ── ESP8266 (Hardware Serial1 on Mega: RX1=pin19, TX1=pin18) ─
 #define ESP_SERIAL  Serial1
 #define ESP_BAUD    115200
 
 // ── Global Objects ─────────────────────────────────────────
+MFRC522            rfid(PIN_RFID_SS, PIN_RFID_RST);
+MFRC522::MIFARE_Key key;
 DHT                dht(DHT_PIN, DHT_TYPE);
 HX711              scale;
 
@@ -138,6 +159,10 @@ bool  loadCellOK          = false;
 bool  hasFoodInContainer  = false;
 float foodConsumedLastGram = 0.0;
 float foodConsumedTotalGram = 0.0;
+
+// ── RFID State ─────────────────────────────────────────────
+char               rfidUID[30]  = "";
+MFRC522::PICC_Type rfidPiccType = MFRC522::PICC_TYPE_UNKNOWN;
 
 // ── DHT State ──────────────────────────────────────────────
 float dhtTemp     = NAN;
@@ -270,6 +295,7 @@ void setFeederMotorSpeed(int speedPercent);
 void setFeederPump(bool on);
 bool runFeederDispenseOnce(int motorRunMs);
 bool runLoadCellTare();
+bool triggerRfidDispenseOnce();
 bool sensorDataChangedSignificantly();
 void updateLastPushedSnapshot();
 void firebaseServiceWindow(unsigned long now);
@@ -930,6 +956,29 @@ bool runLoadCellTare() {
   firebasePushSensorLatest(true);
   return true;
 }
+
+bool triggerRfidDispenseOnce() {
+  unsigned long now = millis();
+  if (now - lastRfidDispenseAt < RFID_DISPENSE_COOLDOWN_MS) {
+    unsigned long remainingMs = RFID_DISPENSE_COOLDOWN_MS - (now - lastRfidDispenseAt);
+    Serial.print(F("[RFID FEED] Cooldown active, skip dispense. Remaining ms="));
+    Serial.println(remainingMs);
+    return false;
+  }
+
+  lastRfidDispenseAt = now;
+
+  Serial.print(F("[RFID FEED] Triggering dispense runMs="));
+  Serial.println(RFID_DISPENSE_RUN_MS);
+
+  bool ok = runFeederDispenseOnce(RFID_DISPENSE_RUN_MS);
+  if (ok) {
+    firebasePushSensorLatest(true);
+  }
+
+  return ok;
+}
+
 
 // ═══════════════════════════════════════════════════════════
 //  ESP8266: AT Command Helpers
@@ -1925,6 +1974,27 @@ bool firebasePushSensorLatest(bool forcePush) {
   return true;
 }
 
+void firebasePushRFIDScan() {
+  String payload = "{";
+  payload += "\"deviceId\":\"" DEVICE_ID "\",";
+  payload += "\"uid\":\"";
+  payload += rfidUID;
+  payload += "\",";
+  payload += "\"type\":\"";
+  payload += rfid.PICC_GetTypeName(rfidPiccType);
+  payload += "\",";
+  payload += "\"timestamp\":{\".sv\":\"timestamp\"}";
+  payload += "}";
+
+  String path = "/rfidScans.json";
+  path += firebaseAuthQuery();
+
+  Serial.println(F("[FB] Appending rfidScans entry ..."));
+  if (!espHttpJsonRequest("POST", path, payload))
+    Serial.println(F("[FB WARN] rfidScans append failed."));
+}
+
+
 // ═══════════════════════════════════════════════════════════
 //  HC-SR04: Distance Reading
 // ═══════════════════════════════════════════════════════════
@@ -2118,6 +2188,48 @@ void readFoodWeight() {
 
 
 // ═══════════════════════════════════════════════════════════
+//  RFID: Card Reading
+// ═══════════════════════════════════════════════════════════
+
+void readRFID() {
+  Serial.println(F("------ RFID TAG DETECTED ------"));
+
+  rfidPiccType = rfid.PICC_GetType(rfid.uid.sak);
+  Serial.print(F("[TYPE] ")); Serial.println(rfid.PICC_GetTypeName(rfidPiccType));
+
+  rfidUID[0] = '\0';
+  char hexBuf[4];
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    if (i > 0) strncat(rfidUID, " ", sizeof(rfidUID) - strlen(rfidUID) - 1);
+    snprintf(hexBuf, sizeof(hexBuf), "%02X", rfid.uid.uidByte[i]);
+    strncat(rfidUID, hexBuf, sizeof(rfidUID) - strlen(rfidUID) - 1);
+  }
+  Serial.print(F("[UID]  ")); Serial.println(rfidUID);
+
+  Serial.print(F("[C-ARRAY] { "));
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    Serial.print(F("0x"));
+    if (rfid.uid.uidByte[i] < 0x10) Serial.print(F("0"));
+    Serial.print(rfid.uid.uidByte[i], HEX);
+    if (i < rfid.uid.size - 1) Serial.print(F(", "));
+  }
+  Serial.println(F(" }  <- paste into AUTH_UIDS[][]"));
+
+  byte gain = rfid.PCD_GetAntennaGain();
+  Serial.print(F("[GAIN] 0x")); Serial.println(gain, HEX);
+  Serial.println(F("-------------------------------\n"));
+
+  // Push RFID event to Firebase so Web App can show live history
+  firebasePushRFIDScan();
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  triggerRfidDispenseOnce();
+}
+
+
+// ═══════════════════════════════════════════════════════════
 //  SETUP
 // ═══════════════════════════════════════════════════════════
 
@@ -2128,7 +2240,7 @@ void setup() {
   while (!Serial && millis() < 3000);
 
   Serial.println(F("============================================"));
-  Serial.println(F("HC-SR04 + DHT11 + HX711 + ESP + FAN + FEEDER"));
+  Serial.println(F("RFID + HC-SR04 + DHT11 + HX711 + ESP + FAN + FEEDER"));
   Serial.println(F("           CYBERPUNK HUD  v1.4              "));
   Serial.println(F("============================================"));
   Serial.println(F("[FAN] Type 0-100 and Enter to set manual fan speed."));
@@ -2165,6 +2277,19 @@ void setup() {
   Serial.print(FEED_PUMP_PIN);
   Serial.print(F(" | Pump with motor="));
   Serial.println(FEED_PUMP_WITH_MOTOR ? F("ON") : F("OFF"));
+
+  // ── RFID ──────────────────────────────────────────────
+  SPI.begin();
+  rfid.PCD_Init();
+  delay(50);
+  Serial.print(F("[RFID] Firmware: "));
+  rfid.PCD_DumpVersionToSerial();
+  byte v = rfid.PCD_ReadRegister(rfid.VersionReg);
+  if (v == 0x00 || v == 0xFF)
+    Serial.println(F("[RFID FAIL] RC522 not detected — check wiring!"));
+  else
+    Serial.println(F("[RFID PASS] RC522 ready."));
+  for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF;
 
   // ── HC-SR04 ───────────────────────────────────────────
   pinMode(TRIG_PIN, OUTPUT);
@@ -2293,4 +2418,9 @@ void loop() {
   // ── Flush buffered samples to Firebase when online ──────
   flushOfflineQueueIfDue(now);
 
+  // ── RFID check ─────────────────────────────────────────
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    readRFID();
+    return;
+  }
 }
