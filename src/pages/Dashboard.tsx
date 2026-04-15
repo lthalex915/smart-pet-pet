@@ -8,6 +8,7 @@ import { useRFIDBinding } from '../hooks/useRFIDBinding';
 import { useBoardConnection } from '../hooks/useBoardConnection';
 import { useFanSettings } from '../hooks/useFanSettings';
 import { useFeedingControl } from '../hooks/useFeedingControl';
+import { useWeightControl } from '../hooks/useWeightControl';
 import SensorCard from '../components/SensorCard';
 import TempHumidityChart from '../components/TempHumidityChart';
 import RFIDLog from '../components/RFIDLog';
@@ -112,6 +113,7 @@ export default function Dashboard({ user }: Props) {
   const [feedingRetryDelayInput, setFeedingRetryDelayInput] = useState(1200);
   const [feedingMaxAttemptsInput, setFeedingMaxAttemptsInput] = useState(3);
   const [feedingFormDirty, setFeedingFormDirty] = useState(false);
+  const [weightMsg, setWeightMsg] = useState('');
 
   const {
     connection: boardConnection,
@@ -163,6 +165,11 @@ export default function Dashboard({ user }: Props) {
     triggerManualFeed,
     clearAlert: clearFeedingAlert,
   } = useFeedingControl(user.uid, data?.weight ?? null, pollIntervalMs);
+  const {
+    triggeringTare,
+    error: weightError,
+    tare: triggerWeightTare,
+  } = useWeightControl(user.uid);
 
   const latestScan = scans[0] ?? null;
 
@@ -394,6 +401,13 @@ export default function Dashboard({ user }: Props) {
     setFeedingSettingsMsg('✓ 已清除提醒');
   };
 
+  const handleWeightTare = async () => {
+    setWeightMsg('');
+
+    const ok = await triggerWeightTare();
+    setWeightMsg(ok ? '✓ 已送出歸零命令，請保持碗穩定 1-2 秒' : '⚠ 歸零命令送出失敗，請檢查連線');
+  };
+
   const fanSpeedDisplay =
     typeof data?.fanSpeed === 'number'
       ? Math.round(data.fanSpeed)
@@ -448,7 +462,7 @@ export default function Dashboard({ user }: Props) {
     if (isSameRFIDUid(latestScan.uid, binding.uid)) {
       return {
         tone: 'green' as const,
-        text: `Tap successful：${binding.name}（${binding.uid}）`,
+        text: `Tap successful：${binding.name}（${binding.uid}），掃卡事件已上傳`,
       };
     }
 
@@ -613,6 +627,41 @@ export default function Dashboard({ user }: Props) {
                   )}
                 </div>
 
+                <div className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm space-y-2">
+                  <p className="text-gray-400 text-xs font-medium uppercase tracking-wider">重量感測器歸零</p>
+                  <p className="text-xs text-gray-500">先把碗放在感測器上，再按歸零，把目前重量當作 0g 起點。</p>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleWeightTare}
+                      disabled={triggeringTare}
+                      className="text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                      style={{ backgroundColor: BLUE }}
+                    >
+                      {triggeringTare ? '歸零中…' : '重量歸零（0g）'}
+                    </button>
+
+                    <span className="text-xs text-gray-500">
+                      當前讀值：{data?.weight != null ? `${data.weight.toFixed(1)} g` : '--'}
+                    </span>
+                  </div>
+
+                  {(weightMsg || weightError) && (
+                    <p
+                      className="text-sm"
+                      style={{
+                        color:
+                          (weightMsg && weightMsg.startsWith('✓'))
+                            ? '#16a34a'
+                            : '#dc2626',
+                      }}
+                    >
+                      {weightMsg || weightError}
+                    </p>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 md:gap-4">
                   <SensorCard
                     label="溫度"
@@ -703,7 +752,7 @@ export default function Dashboard({ user }: Props) {
               <div className="space-y-4">
                 <div>
                   <h2 className="text-xl font-bold text-gray-900">RFID 紀錄</h2>
-                  <p className="text-sm text-gray-400 mt-0.5">僅已綁定 UID 可觸發功能（目前僅顯示 tap 成功訊息）</p>
+                  <p className="text-sm text-gray-400 mt-0.5">顯示刷卡紀錄與綁定比對結果（硬體端可設定掃卡觸發投餵）</p>
                 </div>
 
                 {binding && (

@@ -74,3 +74,11 @@ export function userFeedingConsumptionPath(uid: string): string {
 export function legacyFeedingConsumptionPath(): string {
   return 'sensors/feeding/consumption';
 }
+
+export function userWeightCommandPath(uid: string): string {
+  return `users/${uid}/weight/command`;
+}
+
+export function legacyWeightCommandPath(): string {
+  return 'sensors/weight/command';
+}

@@ -60,8 +60,10 @@
  *  L298N IN1   → Mega Pin 7
  *  L298N IN2   → Mega Pin 11
  *  IRLZ44N GATE→ Mega Pin 10 (Pump MOSFET)
- *  Command source: Firebase /sensors/feeding/command
- *  Supported action: "dispenseOnce" (motorRunMs: 300~5000 ms)
+ *  Command source: Firebase /sensors/feeding/command and /sensors/weight/command
+ *  Supported actions:
+ *    - "dispenseOnce" (motorRunMs: 300~5000 ms)
+ *    - "tareWeight" / "zero" (set current bowl weight baseline to 0 g)
  *
  * LIBRARIES REQUIRED:
  *  - MFRC522 by GithubCommunity
@@ -144,17 +146,21 @@ const bool FEED_PUMP_WITH_MOTOR = false; // Keep false for food-only dispenser
 const int FEED_RUN_MS_DEFAULT = 1000;
 const int FEED_RUN_MS_MIN     = 300;
 const int FEED_RUN_MS_MAX     = 5000;
+const int RFID_DISPENSE_RUN_MS = FEED_RUN_MS_DEFAULT;
+const unsigned long RFID_DISPENSE_COOLDOWN_MS = 5000UL;
 const int WATER_PUMP_RUN_MS_DEFAULT = 1500;
 const int WATER_PUMP_INTERVAL_DEFAULT_MIN = 20;
 
 int  feederMotorSpeed = 0;   // -100..100
 bool feederPumpOn = false;
 char lastFeedingRequestId[48] = "";
+char lastWeightTareRequestId[48] = "";
 int  waterPumpIntervalMin = WATER_PUMP_INTERVAL_DEFAULT_MIN;
 unsigned long waterPumpIntervalMs = (unsigned long)WATER_PUMP_INTERVAL_DEFAULT_MIN * 60UL * 1000UL;
 bool waterPumpCycleActive = false;
 unsigned long waterPumpCycleStartedAt = 0;
 unsigned long lastWaterPumpCycleAt = 0;
+unsigned long lastRfidDispenseAt = 0;
 
 // ── OLED Config ────────────────────────────────────────────
 #define OLED_W      128
@@ -260,6 +266,7 @@ unsigned long lastFirebasePush = 0;
 unsigned long lastFanControlPull = 0;
 unsigned long lastFeedingControlPull = 0;
 unsigned long lastFeedingSettingsPull = 0;
+unsigned long lastWeightControlPull = 0;
 unsigned long lastOfflineStoreTime = 0;
 unsigned long lastOfflineFlushTime = 0;
 unsigned long lastReconnectAttempt = 0;
@@ -303,6 +310,7 @@ const unsigned long FIREBASE_SENSOR_INTERVAL      = 15000;
 const unsigned long FIREBASE_FAN_CONTROL_INTERVAL = 20000;
 const unsigned long FIREBASE_FEEDING_CONTROL_INTERVAL = 5000;
 const unsigned long FIREBASE_FEEDING_SETTINGS_INTERVAL = 30000;
+const unsigned long FIREBASE_WEIGHT_CONTROL_INTERVAL = 5000;
 const unsigned long OFFLINE_STORE_INTERVAL         = 600000;
 const unsigned long OFFLINE_FLUSH_INTERVAL         = 2000;
 const unsigned long WIFI_RECONNECT_INTERVAL        = 15000;
@@ -323,6 +331,7 @@ void configureESP8266PowerSave();
 bool firebasePullFanSettings();
 bool firebasePullFeedingCommand();
 bool firebasePullFeedingSettings();
+bool firebasePullWeightCommand();
 bool firebasePushSensorLatest(bool forcePush = false);
 String firebaseAuthQuery();
 bool espHttpJsonRequest(const char* method, const String& path, const String& payload,
@@ -332,6 +341,8 @@ int sanitizeWaterPumpIntervalMin(int value);
 void setFeederMotorSpeed(int speedPercent);
 void setFeederPump(bool on);
 bool runFeederDispenseOnce(int motorRunMs);
+bool runLoadCellTare();
+bool triggerRfidDispenseOnce();
 bool sensorDataChangedSignificantly();
 void updateLastPushedSnapshot();
 void firebaseServiceWindow(unsigned long now);
@@ -833,6 +844,7 @@ void checkSerialCommandInput() {
     Serial.println(F("motor <speed>      : feeder motor -100..100"));
     Serial.println(F("pump on|off        : feeder pump control"));
     Serial.println(F("dispense [runMs]   : run one feed cycle"));
+    Serial.println(F("tare               : set current weight to 0g"));
     Serial.println(F("help               : show this list"));
     Serial.println(F("-----------------------"));
     return;
@@ -881,6 +893,11 @@ void checkSerialCommandInput() {
     }
 
     runFeederDispenseOnce(runMs);
+    return;
+  }
+
+  if (input.equalsIgnoreCase("tare")) {
+    runLoadCellTare();
     return;
   }
 
@@ -962,6 +979,52 @@ bool runFeederDispenseOnce(int motorRunMs) {
 
   Serial.println(F("[FEED] Dispense done."));
   return true;
+}
+
+bool runLoadCellTare() {
+  if (!loadCellOK) {
+    Serial.println(F("[HX711 WARN] Skip tare: load cell not ready."));
+    return false;
+  }
+
+  if (!scale.is_ready()) {
+    Serial.println(F("[HX711 WARN] Skip tare: HX711 not ready."));
+    return false;
+  }
+
+  Serial.println(F("[HX711] Tare requested. Keep bowl still..."));
+  scale.tare(15);
+
+  foodWeightGram = 0.0f;
+  foodConsumedLastGram = 0.0f;
+  foodConsumedTotalGram = 0.0f;
+  hasFoodInContainer = false;
+
+  Serial.println(F("[HX711 PASS] Weight baseline reset to 0 g."));
+  firebasePushSensorLatest(true);
+  return true;
+}
+
+bool triggerRfidDispenseOnce() {
+  unsigned long now = millis();
+  if (now - lastRfidDispenseAt < RFID_DISPENSE_COOLDOWN_MS) {
+    unsigned long remainingMs = RFID_DISPENSE_COOLDOWN_MS - (now - lastRfidDispenseAt);
+    Serial.print(F("[RFID FEED] Cooldown active, skip dispense. Remaining ms="));
+    Serial.println(remainingMs);
+    return false;
+  }
+
+  lastRfidDispenseAt = now;
+
+  Serial.print(F("[RFID FEED] Triggering dispense runMs="));
+  Serial.println(RFID_DISPENSE_RUN_MS);
+
+  bool ok = runFeederDispenseOnce(RFID_DISPENSE_RUN_MS);
+  if (ok) {
+    firebasePushSensorLatest(true);
+  }
+
+  return ok;
 }
 
 
@@ -1048,6 +1111,8 @@ void attemptWiFiReconnect(unsigned long now) {
   lastFeedingSettingsPull = now;
   firebasePullFeedingCommand();
   lastFeedingControlPull = now;
+  firebasePullWeightCommand();
+  lastWeightControlPull = now;
   firebasePushSensorLatest(true);
   lastFirebasePush = now;
   lastOfflineFlushTime = 0;
@@ -1613,6 +1678,111 @@ bool firebasePatchFeedingCommandStatus(const char* status,
   return espHttpJsonRequest("PATCH", path, String(payload));
 }
 
+bool firebasePatchWeightCommandStatus(const char* status,
+                                      bool executed,
+                                      const char* requestId,
+                                      const char* note) {
+  char payload[360];
+  snprintf(payload, sizeof(payload),
+           "{"
+           "\"status\":\"%s\"," 
+           "\"executed\":%s,"
+           "\"processedBy\":\"%s\"," 
+           "\"processedAt\":{\".sv\":\"timestamp\"},"
+           "\"requestId\":\"%s\"," 
+           "\"note\":\"%s\""
+           "}",
+           status,
+           executed ? "true" : "false",
+           DEVICE_ID,
+           requestId,
+           note);
+
+  String path = "/sensors/weight/command.json";
+  path += firebaseAuthQuery();
+
+  return espHttpJsonRequest("PATCH", path, String(payload));
+}
+
+bool firebasePullWeightCommand() {
+  String response;
+  String path = "/sensors/weight/command.json";
+  path += firebaseAuthQuery();
+
+  if (!espHttpJsonRequest("GET", path, "", &response)) {
+    Serial.println(F("[WEIGHT WARN] weight/command fetch failed."));
+    return false;
+  }
+
+  String body;
+  if (!extractHttpBody(response, &body)) {
+    Serial.println(F("[WEIGHT WARN] weight/command response has no body."));
+    return false;
+  }
+
+  if (body.length() == 0 || body == "null") {
+    return false;
+  }
+
+  String action;
+  if (!jsonReadString(body, "action", &action)) {
+    return false;
+  }
+  action.trim();
+
+  bool isTareAction =
+    action.equalsIgnoreCase("tareWeight") ||
+    action.equalsIgnoreCase("tare") ||
+    action.equalsIgnoreCase("zero");
+  if (!isTareAction) {
+    return false;
+  }
+
+  String status;
+  if (jsonReadString(body, "status", &status)) {
+    status.trim();
+    if (!status.equalsIgnoreCase("pending")) {
+      return true;
+    }
+  }
+
+  String requestId;
+  if (!jsonReadString(body, "requestId", &requestId)) {
+    requestId = "";
+  }
+  requestId.trim();
+
+  if (requestId.length() == 0) {
+    requestId = String("tare-") + String(millis());
+  }
+
+  if (strlen(lastWeightTareRequestId) > 0 && requestId == String(lastWeightTareRequestId)) {
+    firebasePatchWeightCommandStatus("done", true, requestId.c_str(), "deduplicated-no-rerun");
+    return true;
+  }
+
+  Serial.print(F("[WEIGHT] New tare request id="));
+  Serial.println(requestId);
+
+  bool ok = runLoadCellTare();
+
+  strncpy(lastWeightTareRequestId, requestId.c_str(), sizeof(lastWeightTareRequestId) - 1);
+  lastWeightTareRequestId[sizeof(lastWeightTareRequestId) - 1] = '\0';
+
+  if (ok) {
+    if (!firebasePatchWeightCommandStatus("done", true, requestId.c_str(), "tare-complete")) {
+      Serial.println(F("[WEIGHT WARN] Failed to patch weight command status."));
+    }
+    return true;
+  }
+
+  if (!firebasePatchWeightCommandStatus("failed", false, requestId.c_str(), "hx711-not-ready")) {
+    Serial.println(F("[WEIGHT WARN] Failed to patch failed weight command status."));
+  }
+
+  return false;
+}
+
 bool firebasePullFeedingCommand() {
   String response;
   String path = "/sensors/feeding/command.json";
@@ -2155,9 +2325,10 @@ void firebaseServiceWindow(unsigned long now) {
   bool dueFan = (now - lastFanControlPull >= FIREBASE_FAN_CONTROL_INTERVAL);
   bool dueFeedSettings = (now - lastFeedingSettingsPull >= FIREBASE_FEEDING_SETTINGS_INTERVAL);
   bool dueFeed = (now - lastFeedingControlPull >= FIREBASE_FEEDING_CONTROL_INTERVAL);
+  bool dueWeight = (now - lastWeightControlPull >= FIREBASE_WEIGHT_CONTROL_INTERVAL);
   bool duePush = (now - lastFirebasePush >= FIREBASE_SENSOR_INTERVAL);
 
-  if (!dueFan && !dueFeedSettings && !dueFeed && !duePush) {
+  if (!dueFan && !dueFeedSettings && !dueFeed && !dueWeight && !duePush) {
     return;
   }
 
@@ -2179,6 +2350,11 @@ void firebaseServiceWindow(unsigned long now) {
   if (dueFeed) {
     lastFeedingControlPull = now;
     firebasePullFeedingCommand();
+  }
+
+  if (dueWeight) {
+    lastWeightControlPull = now;
+    firebasePullWeightCommand();
   }
 }
 
@@ -2300,6 +2476,8 @@ void readRFID() {
 
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
+
+  triggerRfidDispenseOnce();
 
   displayMode    = MODE_RFID;
   rfidDisplayEnd = millis() + RFID_DISPLAY_DURATION;
@@ -2442,6 +2620,9 @@ void setup() {
     firebasePullFeedingCommand();
     lastFeedingControlPull = millis();
 
+    firebasePullWeightCommand();
+    lastWeightControlPull = millis();
+
     firebasePushSensorLatest(true);
     lastFirebasePush = millis();
   }
@@ -2461,6 +2642,7 @@ void setup() {
   lastWaterPumpCycleAt = millis();
   lastFeedingControlPull = millis();
   lastFeedingSettingsPull = millis();
+  lastWeightControlPull = millis();
   lastOfflineStoreTime = millis();
   lastOfflineFlushTime = millis();
   lastReconnectAttempt = millis();
