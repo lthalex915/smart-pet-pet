@@ -1199,7 +1199,7 @@ bool espOpenFirebaseSocket(String* responseOut) {
 }
 
 bool espHttpJsonRequest(const char* method, const String& path, const String& payload,
-                        String* responseOut = NULL) {
+                        String* responseOut) {
   if (!wifiConnected) {
     Serial.println(F("[FB WARN] Skip push — WiFi is not connected."));
     return false;
