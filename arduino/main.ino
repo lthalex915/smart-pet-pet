@@ -105,6 +105,7 @@
 // Optional fallback for very old ESP8266 AT firmware (e.g. AT 1.1.0) that returns "IP ERROR"
 // Update this IP if backend DNS changes.
 #define FIREBASE_HOST_IP  "35.186.236.207"
+#define ESP8266_LEGACY_TLS_WORKAROUND true  // AT 1.1.0 compatibility mode
 #define FIREBASE_AUTH     ""  // Keep empty if DB rules already allow write
 #define DEVICE_ID         "arduino-mega-01"
 
@@ -203,7 +204,7 @@ bool  dhtOK       = false;
 
 // ── Wi-Fi State ────────────────────────────────────────────
 bool wifiConnected       = false;
-bool firebaseUseIPFallback = false;
+bool firebaseUseIPFallback = ESP8266_LEGACY_TLS_WORKAROUND;
 
 // ── Offline EEPROM Queue State ────────────────────────────
 struct __attribute__((packed)) OfflineQueueMeta {
@@ -1055,6 +1056,7 @@ bool espSendCmd(const char* cmd, const char* expected,
 void initESP8266() {
   Serial.println(F("[ESP] Initialising ESP8266..."));
   wifiConnected = false;
+  firebaseUseIPFallback = ESP8266_LEGACY_TLS_WORKAROUND;
   espPowerSaveConfigured = false;
   espPowerSaveSupported = false;
   ESP_SERIAL.begin(ESP_BAUD);
@@ -1124,6 +1126,13 @@ void configureESP8266SSL() {
   // Not all AT firmware versions support these commands; warnings are expected on old firmware.
   Serial.println(F("[ESP] Configuring SSL options..."));
 
+  if (ESP8266_LEGACY_TLS_WORKAROUND) {
+    Serial.println(F("[ESP] Legacy TLS workaround active: skip CIPSSLCCONF/CIPSSLCSNI."));
+    if (!espSendCmd("AT+CIPSSLSIZE=4096", "OK", 3000))
+      Serial.println(F("[ESP WARN] CIPSSLSIZE unsupported (continuing)."));
+    return;
+  }
+
   if (!espSendCmd("AT+CIPSSLCCONF=0", "OK", 3000))
     Serial.println(F("[ESP WARN] CIPSSLCCONF unsupported (continuing)."));
 
@@ -1145,15 +1154,9 @@ void configureESP8266PowerSave() {
     return;
   }
 
-  Serial.println(F("[ESP] Enabling modem sleep (battery save)..."));
-  if (espSendCmd("AT+SLEEP=2", "OK", 3000) || espSendCmd("AT+SLEEP=1", "OK", 3000)) {
-    espPowerSaveSupported = true;
-    Serial.println(F("[ESP PASS] Modem sleep enabled."));
-  } else {
-    espPowerSaveSupported = false;
-    Serial.println(F("[ESP WARN] Modem sleep unsupported on this AT firmware."));
-  }
-
+  // Keep modem sleep disabled on old AT firmware to improve SSL/HTTP stability.
+  espPowerSaveSupported = false;
+  Serial.println(F("[ESP] Modem sleep disabled for stable Firebase upload."));
   espPowerSaveConfigured = true;
 }
 
@@ -1944,6 +1947,8 @@ bool firebasePushSensorLatest(bool forcePush) {
   char humidityBuf[16];
   char weightBuf[16];
   char thresholdBuf[16];
+  char foodConsumedLastBuf[16];
+  char foodConsumedTotalBuf[16];
 
   if (noEcho || lastDistance < 0) strncpy(distanceBuf, "null", sizeof(distanceBuf) - 1);
   else writeFloatText(distanceBuf, sizeof(distanceBuf), lastDistance, 1);
@@ -1964,6 +1969,8 @@ bool firebasePushSensorLatest(bool forcePush) {
   weightBuf[sizeof(weightBuf) - 1] = '\0';
 
   writeFloatText(thresholdBuf, sizeof(thresholdBuf), fanAutoThresholdC, 1);
+  writeFloatText(foodConsumedLastBuf, sizeof(foodConsumedLastBuf), foodConsumedLastGram, 1);
+  writeFloatText(foodConsumedTotalBuf, sizeof(foodConsumedTotalBuf), foodConsumedTotalGram, 1);
 
   char payload[640];
   snprintf(payload, sizeof(payload),
@@ -1981,8 +1988,8 @@ bool firebasePushSensorLatest(bool forcePush) {
            "\"fae\":%s,"
            "\"fat\":%s,"
            "\"ftr\":%s,"
-           "\"fcl\":%.1f,"
-           "\"fct\":%.1f,"
+           "\"fcl\":%s,"
+           "\"fct\":%s,"
            "\"wpi\":%d,"
            "\"ts\":{\".sv\":\"timestamp\"}"
            "}",
@@ -1999,8 +2006,8 @@ bool firebasePushSensorLatest(bool forcePush) {
            fanAutoEnabled ? "true" : "false",
            thresholdBuf,
            fanAutoTriggered ? "true" : "false",
-           foodConsumedLastGram,
-           foodConsumedTotalGram,
+           foodConsumedLastBuf,
+           foodConsumedTotalBuf,
            waterPumpIntervalMin);
 
   String path = "/sensors/latest.json";
